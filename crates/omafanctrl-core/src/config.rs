@@ -241,6 +241,12 @@ pub struct General {
     pub log_to_file: bool,
     /// Whether readings are logged to CSV.
     pub log_to_csv: bool,
+    /// Whether smart-mode hysteresis is applied.
+    ///
+    /// When disabled, the fan level follows the temperature thresholds exactly,
+    /// which is more responsive but can oscillate around a threshold. Toggleable
+    /// at runtime from the GUI and CLI.
+    pub hysteresis: bool,
     /// Unrecognised keys, preserved for round-tripping.
     pub extra: BTreeMap<String, String>,
 }
@@ -271,6 +277,7 @@ impl Default for General {
             lev64_norm: true,
             log_to_file: false,
             log_to_csv: false,
+            hysteresis: true,
             extra: BTreeMap::new(),
         }
     }
@@ -497,6 +504,7 @@ impl Config {
         out.push_str(&format!("Lev64Norm={}\n", bool_ini(general.lev64_norm)));
         out.push_str(&format!("Log2File={}\n", bool_ini(general.log_to_file)));
         out.push_str(&format!("Log2csv={}\n", bool_ini(general.log_to_csv)));
+        out.push_str(&format!("Hysteresis={}\n", bool_ini(general.hysteresis)));
         for (key, value) in &general.extra {
             out.push_str(&format!("{key}={value}\n"));
         }
@@ -758,6 +766,7 @@ fn build_general(entries: Vec<(String, String, usize)>) -> Result<General, Confi
             "lev64norm" => general.lev64_norm = parse_bool(&key, &value, line)?,
             "log2file" => general.log_to_file = parse_bool(&key, &value, line)?,
             "log2csv" => general.log_to_csv = parse_bool(&key, &value, line)?,
+            "hysteresis" => general.hysteresis = parse_bool(&key, &value, line)?,
             _ => {
                 extra.insert(key, value);
             }
