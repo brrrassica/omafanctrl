@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/omafanctrl-core",
+    "crates/omafanctrld",
+    "crates/omafanctrl-gui",
+    "crates/omafanctrl-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["omafanctrl contributors"]
+repository = "https://github.com/omafanctrl/omafanctrl"
+description = "A modern Linux fan control suite for the ThinkPad E14 Gen 4 on Omarchy Quattro"
+
+[workspace.dependencies]
+omafanctrl-core = { path = "crates/omafanctrl-core" }
+
+# Shared third-party dependencies (wired up in later milestones).
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+gtk4 = "0.9"
+libadwaita = { version = "0.7", features = ["v1_5"] }
