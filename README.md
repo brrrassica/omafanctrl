@@ -9,6 +9,14 @@ internal behavior — direct Embedded Controller (EC) access, BIOS/Manual/Smart
 modes, and `.ini` configuration — while providing a beautiful, minimalistic,
 adaptive interface that feels native under Hyprland tiling.
 
+## Releases
+
+The latest stable release is
+[`v1.0.0`](https://github.com/brrrassica/omafanctrl/releases/tag/v1.0.0).
+Install it from the AUR (`yay -S omafanctrl`), from the release tarball, or
+manually — see [docs/install.md](docs/install.md). The change history is in
+[CHANGELOG.md](CHANGELOG.md).
+
 ## Components
 
 | Component | Description |

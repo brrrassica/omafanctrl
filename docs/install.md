@@ -18,15 +18,34 @@ must run as root. The clients talk to it over the D-Bus **system bus**.
 - The `ec_sys` kernel module with write support
 - GTK4 and libadwaita (for the GUI)
 
-## From the AUR
+## From a release tarball
+
+Every release is published on GitHub with a source tarball. To build and install
+the latest release (`v1.0.0`):
 
 ```sh
-yay -S omafanctrl-git
+curl -LO https://github.com/brrrassica/omafanctrl/archive/refs/tags/v1.0.0.tar.gz
+tar xf v1.0.0.tar.gz
+cd omafanctrl-1.0.0
+cargo build --release --locked
 ```
 
-The package installs the binaries, the D-Bus policy, the polkit action, the
-systemd unit, the `ec_sys` drop-ins, the desktop entry, and a default
-configuration at `/etc/omafanctrl/TPFanControl.ini`.
+Then install the binaries and system files as in
+[Manual install](#manual-install). The release notes and the full change history
+are in [`CHANGELOG.md`](../CHANGELOG.md).
+
+## From the AUR
+
+Two packages are available:
+
+| Package | Tracks | Install |
+| --- | --- | --- |
+| `omafanctrl` | The latest tagged release | `yay -S omafanctrl` |
+| `omafanctrl-git` | The `master` branch | `yay -S omafanctrl-git` |
+
+Both install the binaries, the D-Bus policy, the polkit action, the systemd
+unit, the `ec_sys` drop-ins, the desktop entry, and a default configuration at
+`/etc/omafanctrl/TPFanControl.ini`.
 
 Enable the daemon:
 
@@ -78,7 +97,7 @@ packaging/appimage/build.sh
 
 An AppImage cannot install a system service. The AppImage clients need the
 daemon running on the system bus, so you must install `omafanctrld` separately —
-either from the AUR (`yay -S omafanctrl-git`) or manually as above. Without the
+either from the AUR (`yay -S omafanctrl`) or manually as above. Without the
 daemon, the clients report `the omafanctrl daemon is not available`.
 
 ## Verifying the install
@@ -86,3 +105,24 @@ daemon, the clients report `the omafanctrl daemon is not available`.
 ```sh
 systemctl status omafanctrld
 omafanctrl status
+```
+
+## Helper scripts
+
+The repository ships three operational scripts under [`scripts/`](../scripts/).
+They require root and a built release binary (`cargo build --release`).
+
+| Script | Purpose |
+| --- | --- |
+| [`scripts/e2e-smoke.sh`](../scripts/e2e-smoke.sh) | End-to-end smoke test: starts the daemon, exercises the CLI, and always reverts the fan to BIOS auto |
+| [`scripts/verify-watchdog.sh`](../scripts/verify-watchdog.sh) | Verifies the `kill -9` safety net (`ExecStopPost`) reverts the fan to BIOS auto |
+| [`scripts/profile-daemon.sh`](../scripts/profile-daemon.sh) | Measures the daemon's idle CPU time, context switches, and memory |
+
+```sh
+sudo scripts/e2e-smoke.sh
+sudo scripts/verify-watchdog.sh
+sudo scripts/profile-daemon.sh 60
+```
+
+See [`docs/testing.md`](testing.md) for the full hardware checklist and
+[`docs/profiling.md`](profiling.md) for the idle-cost methodology.
