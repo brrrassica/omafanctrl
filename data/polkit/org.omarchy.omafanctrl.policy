@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  polkit action for omafanctrl.
+
+  Install to /usr/share/polkit-1/actions/org.omarchy.omafanctrl.policy.
+
+  The daemon checks this action before applying any mutating request
+  (SetMode, SetManualLevel, SetHysteresis, SetConfig, ReloadConfig). Read-only
+  requests (GetState, GetConfig) and signals are not gated.
+-->
+<policyconfig>
+  <vendor>omafanctrl</vendor>
+  <vendor_url>https://github.com/omafanctrl/omafanctrl</vendor_url>
+
+  <action id="org.omarchy.omafanctrl.control">
+    <description>Control the ThinkPad fan</description>
+    <message>Authentication is required to change the fan mode, level, or configuration</message>
+    <icon_name>preferences-system</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

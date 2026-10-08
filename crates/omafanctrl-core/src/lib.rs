@@ -9,6 +9,8 @@
 //! sensors, compute a target fan level, and write the fan control register.
 
 pub mod config;
+pub mod daemon;
+pub mod dbus;
 pub mod ec;
 pub mod engine;
 pub mod fan_curve;

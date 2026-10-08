@@ -59,6 +59,43 @@ sudo cargo run -p omafanctrl-core --bin omafanctrl-probe -- --sweep --force
 The sweep records the RPM at each level, compares it against the known curve, and
 always restores BIOS auto control when it finishes.
 
+## Daemon and D-Bus
+
+`omafanctrld` is the only component that writes to the EC. It runs the control
+loop and serves the `org.omarchy.omafanctrl` interface on the **system bus** at
+`/org/omarchy/omafanctrl`:
+
+| Method | Purpose |
+| --- | --- |
+| `GetState` | A snapshot (mode, levels, RPM, temperatures) |
+| `SetMode` | Switch between `bios`, `manual`, and `smart` |
+| `SetManualLevel` | Set the manual fan level |
+| `SetHysteresis` | Enable or disable smart-mode hysteresis |
+| `GetConfig` / `SetConfig` | Read or replace the `.ini` configuration |
+| `ReloadConfig` | Re-read the configuration file from disk |
+
+It also emits the `StateChanged` and `ConfigChanged` signals.
+
+Run it directly (as root, with `ec_sys write_support=1` loaded):
+
+```sh
+sudo ./target/debug/omafanctrld --config data/profiles/e14-gen4.ini
+```
+
+### System integration files
+
+| File | Install to |
+| --- | --- |
+| [`data/dbus/org.omarchy.omafanctrl.conf`](data/dbus/org.omarchy.omafanctrl.conf) | `/usr/share/dbus-1/system.d/` |
+| [`data/polkit/org.omarchy.omafanctrl.policy`](data/polkit/org.omarchy.omafanctrl.policy) | `/usr/share/polkit-1/actions/` |
+| [`data/systemd/omafanctrld.service`](data/systemd/omafanctrld.service) | `/usr/lib/systemd/system/` |
+| [`data/modules-load.d/ec_sys.conf`](data/modules-load.d/ec_sys.conf) | `/etc/modules-load.d/` |
+| [`data/modprobe.d/ec_sys.conf`](data/modprobe.d/ec_sys.conf) | `/etc/modprobe.d/` |
+
+The systemd unit's `ExecStopPost=/usr/bin/omafanctrld --revert` is a safety net
+that hands the fan back to the firmware even after `kill -9`, when the in-process
+watchdog cannot run.
+
 ## Fan curve
 
 The E14 Gen 4 fan is not linear in the EC fan-control level. The observed curve

@@ -8,3 +8,7 @@ description = "Shared library for omafanctrl: EC protocol, config, and control e
 
 [dependencies]
 thiserror.workspace = true
+serde.workspace = true
+zbus.workspace = true
+tokio.workspace = true
+tracing.workspace = true

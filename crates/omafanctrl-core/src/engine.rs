@@ -27,7 +27,7 @@
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
-use crate::config::{Config, SmartLevel};
+use crate::config::{Config, ConfigError, SmartLevel};
 use crate::ec::{Ec, EcBackend, EcError, FAN_LEVEL_MAX, TEMP_MAX_C};
 
 /// The default minimum time between two fan-level changes.
@@ -285,6 +285,14 @@ impl Engine {
         self.last_change = None;
     }
 
+    /// Clear the minimum-dwell timer so the next decision is not delayed.
+    ///
+    /// Used when an explicit user command should take effect immediately rather
+    /// than waiting out the anti-oscillation dwell.
+    pub fn clear_dwell(&mut self) {
+        self.last_change = None;
+    }
+
     /// The maximum usable temperature across the readings, if any.
     pub fn max_temperature(&self, readings: &[SensorReading]) -> Option<u8> {
         readings
@@ -313,10 +321,13 @@ impl Engine {
         })
     }
 
-    /// Evaluate the current readings and return the action to take.
+    /// Decide the action to take for the current readings, without changing the
+    /// engine state.
     ///
-    /// `now` is injected so the dwell logic is deterministic in tests.
-    pub fn evaluate(&mut self, readings: &[SensorReading], now: Instant) -> Decision {
+    /// `now` is injected so the dwell logic is deterministic in tests. Pair this
+    /// with [`Engine::commit`] once the decision has been applied to the EC, so
+    /// that a failed write is retried on the next evaluation.
+    pub fn decide(&self, readings: &[SensorReading], now: Instant) -> Decision {
         let max_temperature = self.max_temperature(readings);
         let emergency = max_temperature
             .is_some_and(|temperature| temperature >= self.policy.emergency_temperature);
@@ -356,12 +367,36 @@ impl Engine {
             }
         }
 
-        self.current_level = desired;
-        self.last_change = Some(now);
         match desired {
             Some(level) => Decision::SetLevel(level),
             None => Decision::BiosAuto,
         }
+    }
+
+    /// Record that a [`Decision`] was successfully applied to the EC.
+    pub fn commit(&mut self, decision: Decision, now: Instant) {
+        match decision {
+            Decision::Hold => {}
+            Decision::SetLevel(level) => {
+                self.current_level = Some(level);
+                self.last_change = Some(now);
+            }
+            Decision::BiosAuto => {
+                self.current_level = None;
+                self.last_change = Some(now);
+            }
+        }
+    }
+
+    /// Decide and commit in one step.
+    ///
+    /// A convenience for callers that apply the decision infallibly (such as
+    /// tests). The daemon uses [`Engine::decide`] and [`Engine::commit`]
+    /// separately so that a failed EC write is retried on the next tick.
+    pub fn evaluate(&mut self, readings: &[SensorReading], now: Instant) -> Decision {
+        let decision = self.decide(readings, now);
+        self.commit(decision, now);
+        decision
     }
 }
 
@@ -443,6 +478,10 @@ pub enum EngineError {
     /// The guarded control loop panicked; the fan was reverted to BIOS auto.
     #[error("the control loop panicked; the fan was reverted to BIOS auto")]
     Panicked,
+
+    /// The configuration could not be loaded or validated.
+    #[error("configuration error: {0}")]
+    Config(#[from] ConfigError),
 }
 
 /// Owns the EC and guarantees a revert to BIOS auto when dropped.
