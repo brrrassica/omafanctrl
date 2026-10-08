@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "omafanctrl-cli"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "omafanctrl-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "omafanctrl-gui"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-channel",
  "futures-util",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "omafanctrld"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "clap",

@@ -10,7 +10,7 @@
 # real one for the release tarball.
 
 pkgname=omafanctrl
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="Modern fan control suite for the ThinkPad E14 Gen 4 on Omarchy Quattro"
 arch=('x86_64')

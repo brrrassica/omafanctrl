@@ -12,10 +12,28 @@ adaptive interface that feels native under Hyprland tiling.
 ## Releases
 
 The latest stable release is
-[`v1.0.0`](https://github.com/brrrassica/omafanctrl/releases/tag/v1.0.0).
-Install it from the AUR (`yay -S omafanctrl`), from the release tarball, or
-manually — see [docs/install.md](docs/install.md). The change history is in
+[`v1.0.1`](https://github.com/brrrassica/omafanctrl/releases/tag/v1.0.1).
+Install it with the one-shot installer from the release bundle
+(`omafanctrl.zip`), from the AUR (`yay -S omafanctrl`), or manually — see
+[docs/install.md](docs/install.md). The change history is in
 [CHANGELOG.md](CHANGELOG.md).
+
+## Quick install
+
+On a ThinkPad running Omarchy Quattro (4.x), the release bundle installs
+everything — dependencies, binaries, the daemon, and the desktop integrations —
+in one step:
+
+```sh
+curl -LO https://github.com/brrrassica/omafanctrl/releases/latest/download/omafanctrl.zip
+unzip omafanctrl.zip
+cd omafanctrl-1.0.1
+./install.sh
+```
+
+[`install.sh`](install.sh) re-execs itself with `sudo`, verifies the platform,
+and refuses to run on anything other than Omarchy 4 on a ThinkPad. See
+[docs/install.md](docs/install.md) for the manual and AUR paths.
 
 ## Components
 
@@ -224,6 +242,9 @@ and append the per-mode colours from
 
 ## Packaging
 
+- **Release bundle** — `omafanctrl.zip` (built by CI) contains the prebuilt
+  binaries, [`install.sh`](install.sh), and the system files. See
+  [docs/install.md](docs/install.md#one-shot-install-recommended).
 - **AUR** — the stable [`packaging/aur/omafanctrl/PKGBUILD`](packaging/aur/omafanctrl/PKGBUILD)
   and the [`omafanctrl-git`](packaging/aur/PKGBUILD) package both build the whole
   workspace and install the daemon, CLI, Waybar module, GUI, and all system

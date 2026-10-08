@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-10-08
+
+### Added
+
+- **One-shot installer** ([`install.sh`](install.sh)): a single script that
+  installs every component and dependency on Omarchy Quattro (4.x) on a
+  ThinkPad, loads the `ec_sys` module, enables the daemon, and wires up the
+  Hyprland and Waybar integrations. It refuses to run on any other distribution
+  or hardware.
+- **Release bundle** (`omafanctrl.zip`): CI now builds the release binaries and
+  packages them together with `install.sh` and the system files, so a release
+  can be installed with a single command. A separate `sources.zip` is published
+  alongside it.
+
+### Changed
+
+- CI builds and publishes `omafanctrl.zip` and `sources.zip` as build artifacts,
+  and attaches both to tagged GitHub releases.
+
+[1.0.1]: https://github.com/omafanctrl/omafanctrl/releases/tag/v1.0.1
+
 ## [1.0.0] - 2026-10-08
 
 The first stable release of omafanctrl, a modern fan control suite for the

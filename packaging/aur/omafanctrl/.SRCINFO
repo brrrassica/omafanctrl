@@ -1,6 +1,6 @@
 pkgbase = omafanctrl
 	pkgdesc = Modern fan control suite for the ThinkPad E14 Gen 4 on Omarchy Quattro
-	pkgver = 1.0.0
+	pkgver = 1.0.1
 	pkgrel = 1
 	url = https://github.com/omafanctrl/omafanctrl
 	arch = x86_64
@@ -15,7 +15,7 @@ pkgbase = omafanctrl
 	provides = omafanctrl
 	conflicts = omafanctrl-git
 	backup = etc/omafanctrl/TPFanControl.ini
-	source = omafanctrl-1.0.0.tar.gz::https://github.com/omafanctrl/omafanctrl/archive/refs/tags/v1.0.0.tar.gz
+	source = omafanctrl-1.0.1.tar.gz::https://github.com/omafanctrl/omafanctrl/archive/refs/tags/v1.0.1.tar.gz
 	sha256sums = SKIP
 
 pkgname = omafanctrl

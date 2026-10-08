@@ -15,18 +15,52 @@ must run as root. The clients talk to it over the D-Bus **system bus**.
 ## Requirements
 
 - Arch Linux / Omarchy Quattro (4.x)
+- A ThinkPad (the shipped profile targets the E14 Gen 4)
 - The `ec_sys` kernel module with write support
 - GTK4 and libadwaita (for the GUI)
 
-## From a release tarball
+## One-shot install (recommended)
 
-Every release is published on GitHub with a source tarball. To build and install
-the latest release (`v1.0.0`):
+On a ThinkPad running Omarchy Quattro (4.x), the release bundle installs every
+component and dependency in one step. Download `omafanctrl.zip` from the
+[latest release](https://github.com/brrrassica/omafanctrl/releases/latest),
+extract it, and run the installer:
 
 ```sh
-curl -LO https://github.com/brrrassica/omafanctrl/archive/refs/tags/v1.0.0.tar.gz
-tar xf v1.0.0.tar.gz
-cd omafanctrl-1.0.0
+curl -LO https://github.com/brrrassica/omafanctrl/releases/latest/download/omafanctrl.zip
+unzip omafanctrl.zip
+cd omafanctrl-1.0.1
+./install.sh
+```
+
+The installer:
+
+- re-execs itself with `sudo`;
+- verifies the platform and **refuses to run** on anything other than Omarchy 4
+  on a ThinkPad;
+- installs the runtime dependencies (`gtk4`, `libadwaita`, `dbus`, `polkit`) and,
+  when no prebuilt binaries are present, the build dependencies
+  (`base-devel`, `rust`, `pkgconf`, `git`);
+- installs the daemon, CLI, Waybar module, GUI, and probe binaries;
+- installs the D-Bus policy, polkit action, systemd unit, `ec_sys` drop-ins,
+  desktop entry, icon, and the default `/etc/omafanctrl/TPFanControl.ini`;
+- loads `ec_sys` with `write_support=1` and enables `omafanctrld`;
+- appends the Hyprland keybindings and the Waybar module/styling for the
+  invoking user.
+
+It is idempotent, so re-running it upgrades an existing install in place. Pass
+`--no-user-setup` to skip the per-user Hyprland/Waybar wiring.
+
+## From a release tarball (source)
+
+Every release is published on GitHub with a source tarball (`sources.zip`) and a
+binary bundle (`omafanctrl.zip`). To build the latest release (`v1.0.1`) from
+source:
+
+```sh
+curl -LO https://github.com/brrrassica/omafanctrl/archive/refs/tags/v1.0.1.tar.gz
+tar xf v1.0.1.tar.gz
+cd omafanctrl-1.0.1
 cargo build --release --locked
 ```
 

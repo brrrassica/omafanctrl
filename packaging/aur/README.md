@@ -4,7 +4,7 @@ Two AUR packages are prepared:
 
 | Package | Directory | Source |
 | --- | --- | --- |
-| `omafanctrl` (stable) | [`omafanctrl/`](omafanctrl/) | The `v1.0.0` release tarball |
+| `omafanctrl` (stable) | [`omafanctrl/`](omafanctrl/) | The `v1.0.1` release tarball |
 | `omafanctrl-git` | [`PKGBUILD`](PKGBUILD) | The `master` branch |
 
 Both build the whole Cargo workspace and install the daemon, CLI, Waybar module,
@@ -25,8 +25,8 @@ The AUR hosts one package per repository. To publish `omafanctrl`:
 1. **Tag the release** in the main repository:
 
    ```sh
-   git tag -a v1.0.0 -m "omafanctrl v1.0.0"
-   git push origin v1.0.0
+   git tag -a v1.0.1 -m "omafanctrl v1.0.1"
+   git push origin v1.0.1
    ```
 
 2. **Fill in the checksum.** The `PKGBUILD` ships with `sha256sums=('SKIP')`
@@ -52,7 +52,7 @@ The AUR hosts one package per repository. To publish `omafanctrl`:
    cp PKGBUILD .SRCINFO aur-omafanctrl/
    cd aur-omafanctrl
    git add PKGBUILD .SRCINFO
-   git commit -m "omafanctrl 1.0.0"
+   git commit -m "omafanctrl 1.0.1"
    git push
    ```
 
@@ -71,5 +71,5 @@ makepkg --printsrcinfo > .SRCINFO
 
 ```sh
 namcap PKGBUILD
-namcap omafanctrl-1.0.0-1-x86_64.pkg.tar.zst
+namcap omafanctrl-1.0.1-1-x86_64.pkg.tar.zst
 ```

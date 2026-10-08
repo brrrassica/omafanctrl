@@ -1,5 +1,9 @@
 # Troubleshooting
 
+If you installed with [`install.sh`](../install.sh), re-running it repairs the
+system files, reloads `ec_sys`, and restarts the daemon. The manual fixes below
+are for installs done by hand.
+
 ## The daemon exits with `Request to own name refused by policy`
 
 The D-Bus system-bus policy is not installed. Install it and reload D-Bus:

@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
+    tags: ["v*"]
   pull_request:
 
 env:
@@ -15,6 +16,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev libdbus-1-dev pkg-config
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -35,3 +42,105 @@ jobs:
 
       - name: Build
         run: cargo build --all
+
+  package:
+    name: Build binaries and package
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev libdbus-1-dev pkg-config zip
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --locked --workspace
+
+      - name: Read version
+        id: version
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Packaging omafanctrl $version"
+
+      - name: Assemble the release bundle
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          stage="build/omafanctrl-$version"
+          rm -rf build
+          mkdir -p "$stage/bin"
+
+          # Binaries.
+          install -Dm755 target/release/omafanctrld      "$stage/bin/omafanctrld"
+          install -Dm755 target/release/omafanctrl        "$stage/bin/omafanctrl"
+          install -Dm755 target/release/omafanctrl-waybar "$stage/bin/omafanctrl-waybar"
+          install -Dm755 target/release/omafanctrl-gui    "$stage/bin/omafanctrl-gui"
+          install -Dm755 target/release/omafanctrl-probe  "$stage/bin/omafanctrl-probe"
+
+          # Installer and payload.
+          install -Dm755 install.sh "$stage/install.sh"
+          cp -a data "$stage/data"
+          cp -a docs "$stage/docs"
+          install -Dm644 README.md   "$stage/README.md"
+          install -Dm644 CHANGELOG.md "$stage/CHANGELOG.md"
+          install -Dm644 LICENSE     "$stage/LICENSE"
+
+          # Zip the bundle (install.sh + prebuilt binaries + data).
+          ( cd build && zip -r -q "../omafanctrl.zip" "omafanctrl-$version" )
+
+      - name: Create sources.zip
+        run: |
+          set -euo pipefail
+          git archive --format=zip --prefix="omafanctrl-${{ steps.version.outputs.version }}/" \
+            -o sources.zip HEAD
+
+      - name: Upload omafanctrl.zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: omafanctrl.zip
+          path: omafanctrl.zip
+          if-no-files-found: error
+
+      - name: Upload sources.zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: sources.zip
+          path: sources.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download omafanctrl.zip
+        uses: actions/download-artifact@v4
+        with:
+          name: omafanctrl.zip
+
+      - name: Download sources.zip
+        uses: actions/download-artifact@v4
+        with:
+          name: sources.zip
+
+      - name: Publish the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            omafanctrl.zip
+            sources.zip
+          generate_release_notes: true
