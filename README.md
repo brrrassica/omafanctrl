@@ -141,6 +141,28 @@ o.bind("SUPER + F3", "Fan: status", "omafanctrl status --notify")
 `o.bind(keys, description, command)` is the Omarchy helper; the description is
 shown by `omarchy menu keybindings --print`.
 
+## GUI
+
+`omafanctrl-gui` is a GTK4 + libadwaita desktop app. It uses an adaptive
+`AdwNavigationSplitView` shell (sidebar + content) that collapses to a single
+column at narrow tiling widths, and follows the system light/dark theme.
+
+```sh
+./target/debug/omafanctrl-gui
+```
+
+Pages:
+
+- **Overview** — live temperatures, RPM, the mode switch, manual level, and a
+  Cairo temperature-history chart.
+- **Smart Curve** — a draggable curve editor plus precise threshold spin rows.
+- **Sensors** — enable/disable (ignore), rename, and inspect each sensor.
+- **Settings** — cycle interval, start behaviour, config path, and reload.
+
+Live data is pushed from the daemon's `StateChanged`/`ConfigChanged` signals; if
+the daemon is unreachable the app shows an `AdwStatusPage` and surfaces errors as
+`AdwToast` notifications.
+
 ## Fan curve
 
 The E14 Gen 4 fan is not linear in the EC fan-control level. The observed curve

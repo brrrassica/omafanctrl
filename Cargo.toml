@@ -30,5 +30,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "tim
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
+async-channel = "2"
+futures-util = "0.3"
 gtk4 = "0.9"
 libadwaita = { version = "0.7", features = ["v1_5"] }
