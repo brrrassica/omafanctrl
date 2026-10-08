@@ -1000,4 +1000,51 @@ Level=60 3 0 0
         assert_eq!(readings[0], SensorReading::new(0x78, "cpu", 45));
         assert_eq!(readings[1], SensorReading::new(0x7A, "x7a", 50));
     }
+
+    // --- Watchdog verification (M9) --------------------------------------
+    //
+    // The watchdog must revert the fan to BIOS auto on every exit path:
+    // clean drop, explicit revert, panic unwinding, and (via the systemd
+    // `ExecStopPost` safety net) `kill -9`. These tests cover the in-process
+    // paths; `scripts/verify-watchdog.sh` covers the `kill -9` path on real
+    // hardware.
+
+    #[test]
+    fn watchdog_revert_can_be_called_explicitly() {
+        let (backend, bytes) = SharedBackend::new();
+        let mut watchdog = Watchdog::new(Ec::new(backend));
+        watchdog.ec_mut().set_fan_level(3).unwrap();
+        assert_eq!(bytes.lock().unwrap()[usize::from(REG_FAN_CONTROL)], 3);
+
+        watchdog.revert().unwrap();
+        assert_eq!(
+            bytes.lock().unwrap()[usize::from(REG_FAN_CONTROL)],
+            FAN_BIOS_AUTO
+        );
+        // Disarm so the drop does not write a second time.
+        watchdog.disarm();
+    }
+
+    #[test]
+    fn watchdog_reverts_when_unwinding_from_a_panic() {
+        let (backend, bytes) = SharedBackend::new();
+
+        // Silence the panic message for a clean test run.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut watchdog = Watchdog::new(Ec::new(backend));
+            watchdog.ec_mut().set_fan_level(3).unwrap();
+            assert_eq!(bytes.lock().unwrap()[usize::from(REG_FAN_CONTROL)], 3);
+            panic!("simulated crash while the watchdog is armed");
+        }));
+        std::panic::set_hook(previous);
+
+        assert!(result.is_err());
+        // The watchdog's `Drop` ran during unwinding and reverted the fan.
+        assert_eq!(
+            bytes.lock().unwrap()[usize::from(REG_FAN_CONTROL)],
+            FAN_BIOS_AUTO
+        );
+    }
 }

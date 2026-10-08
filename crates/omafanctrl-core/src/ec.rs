@@ -750,4 +750,73 @@ mod tests {
             EcError::OutOfBounds { offset } if offset == EC_WINDOW_SIZE
         ));
     }
+
+    // --- Safety-invariant audit (M9) -------------------------------------
+    //
+    // These tests pin the invariants documented in `docs/ec-write-audit.md`.
+    // If any of them fails, the EC write surface has grown beyond the verified
+    // register set and the change must be reviewed before shipping.
+
+    #[test]
+    fn every_non_writable_register_is_rejected() {
+        let mut ec = ec().with_min_write_interval(Duration::ZERO);
+        for offset in 0u8..=u8::MAX {
+            if WRITABLE_REGISTERS.contains(&offset) {
+                continue;
+            }
+            assert!(
+                matches!(
+                    ec.write_byte(offset, 0xAA).unwrap_err(),
+                    EcError::WriteNotAllowed { offset: rejected } if rejected == offset
+                ),
+                "offset 0x{offset:02X} should be rejected"
+            );
+        }
+        // Not a single byte may have reached the backend.
+        assert!(ec.backend.writes.is_empty());
+    }
+
+    #[test]
+    fn fan_operations_only_write_writable_registers() {
+        let mut ec = ec().with_min_write_interval(Duration::ZERO);
+        ec.set_fan_level(3).unwrap();
+        ec.set_fan_auto().unwrap();
+        ec.set_fan_disengaged().unwrap();
+
+        assert!(!ec.backend.writes.is_empty());
+        for (offset, _) in &ec.backend.writes {
+            assert!(
+                WRITABLE_REGISTERS.contains(&(*offset as u8)),
+                "a fan operation wrote non-writable register 0x{offset:02X}"
+            );
+        }
+    }
+
+    #[test]
+    fn temperature_boundary_is_enforced() {
+        let mut ec = ec();
+        ec.backend.bytes[0x78] = TEMP_MAX_C;
+        assert_eq!(ec.read_temperature(0x78).unwrap(), TEMP_MAX_C);
+
+        ec.backend.bytes[0x78] = TEMP_MAX_C + 1;
+        assert!(matches!(
+            ec.read_temperature(0x78).unwrap_err(),
+            EcError::TemperatureOutOfRange {
+                offset: 0x78,
+                value
+            } if value == TEMP_MAX_C + 1
+        ));
+    }
+
+    #[test]
+    fn fan_auto_is_the_only_value_that_hands_back_control() {
+        // 0x80 is the BIOS-auto sentinel; 0x00 would turn the fan off and must
+        // never be produced by the safe revert path.
+        assert_eq!(FAN_BIOS_AUTO, 0x80);
+        assert_ne!(FAN_BIOS_AUTO, 0x00);
+
+        let mut ec = ec();
+        ec.set_fan_auto().unwrap();
+        assert_eq!(ec.backend.bytes[usize::from(REG_FAN_CONTROL)], 0x80);
+    }
 }

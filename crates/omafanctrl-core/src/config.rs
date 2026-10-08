@@ -1485,4 +1485,91 @@ Foo=bar
         assert_eq!(reloaded.general.active, 1);
         std::fs::remove_file(&path).ok();
     }
+
+    /// A tiny deterministic xorshift64 PRNG.
+    ///
+    /// The fuzz smoke test below must run on stable Rust in CI without pulling
+    /// in an external fuzzing dependency, so it carries its own generator. The
+    /// seed is fixed, making any failure reproducible.
+    struct XorShift64(u64);
+
+    impl XorShift64 {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    /// Parse `input` and, if it succeeds, assert the result round-trips.
+    ///
+    /// The parser must never panic on arbitrary input: malformed input is
+    /// reported as a [`ConfigError`], never as a crash.
+    fn check_parse_never_panics(input: &str) {
+        if let Ok(config) = input.parse::<Config>() {
+            let rendered = config.to_ini();
+            let reparsed: Config = rendered
+                .parse()
+                .unwrap_or_else(|error| panic!("round-trip failed for {input:?}: {error}"));
+            assert_eq!(config, reparsed, "round-trip mismatch for {input:?}");
+        }
+    }
+
+    #[test]
+    fn fuzz_parser_never_panics_and_round_trips() {
+        // Structurally interesting seeds: empty input, lone delimiters,
+        // truncated sections, overflowing numbers, and control characters.
+        let seeds = [
+            "",
+            "\n",
+            "=",
+            "[]",
+            "[",
+            "]",
+            "[General",
+            "[General]",
+            "Active=",
+            "Active=99999999999999999999",
+            "Cycle=-1",
+            "Level=",
+            "Level=1 2 3 4 5",
+            "Level=99999999999999999999 2",
+            "Level2=50 2 0 0",
+            "MenuLabelSM1=One/",
+            "IconLevels=",
+            "IconLevels=65,75,80",
+            "FanBeep=1",
+            "SensorName=",
+            "SensorName999999999999999999999=x",
+            "IgnoreSensors=,,,",
+            "IgnoreSensors=pwr,no5",
+            "\u{0}\u{1}\u{2}",
+            "Active=1\r\nCycle=2\r\n",
+            "Level=50 2 0 0\nLevel=40 1 0 0\n",
+            "[Weird]\nFoo=bar\n",
+            "// comment only\n",
+            "; comment only\n",
+            "# comment only\n",
+        ];
+        for seed in seeds {
+            check_parse_never_panics(seed);
+        }
+
+        // Random noise over an alphabet biased towards `.ini` syntax.
+        let alphabet: &[u8] =
+            b"[]=;#,/ \t\n\r0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_.";
+        let mut rng = XorShift64(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..20_000 {
+            let len = (rng.next() % 64) as usize;
+            let mut input = String::with_capacity(len);
+            for _ in 0..len {
+                let index = (rng.next() as usize) % alphabet.len();
+                input.push(alphabet[index] as char);
+            }
+            check_parse_never_panics(&input);
+        }
+    }
 }

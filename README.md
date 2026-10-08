@@ -210,12 +210,17 @@ and append the per-mode colours from
 - [Modes](docs/modes.md) — BIOS, Manual, Smart, hysteresis, safety limits
 - [Safety](docs/safety.md) — what is protected and the watchdog
 - [Troubleshooting](docs/troubleshooting.md) — ec_sys, debugfs, permissions
+- [Testing](docs/testing.md) — automated tests, fuzzing, and the hardware checklist
+- [EC write audit](docs/ec-write-audit.md) — the safety invariants on every EC write
+- [Profiling](docs/profiling.md) — idle CPU wakeups and cost
 
 ## Packaging
 
-- **AUR** — [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD) builds the whole
-  workspace and installs the daemon, CLI, Waybar module, GUI, and all system
-  files.
+- **AUR** — the stable [`packaging/aur/omafanctrl/PKGBUILD`](packaging/aur/omafanctrl/PKGBUILD)
+  and the [`omafanctrl-git`](packaging/aur/PKGBUILD) package both build the whole
+  workspace and install the daemon, CLI, Waybar module, GUI, and all system
+  files. See [`packaging/aur/README.md`](packaging/aur/README.md) for the publish
+  process.
 - **AppImage** — [`packaging/appimage/build.sh`](packaging/appimage/build.sh)
   bundles the GUI and CLI clients. The privileged daemon must be installed
   separately; see the

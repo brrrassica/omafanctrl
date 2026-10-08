@@ -26,6 +26,12 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/omafanctrl/TPFanControl.ini";
 /// The default control-loop interval, in seconds.
 const DEFAULT_INTERVAL_SECS: u64 = 5;
 
+/// The default telemetry sampling interval, in milliseconds.
+///
+/// Telemetry drives the GUI temperature history independently of the
+/// fan-control cadence. See `docs/profiling.md` for the idle-cost trade-off.
+const DEFAULT_TELEMETRY_INTERVAL_MS: u64 = 250;
+
 /// Command-line arguments for the daemon.
 #[derive(Debug, Parser)]
 #[command(name = "omafanctrld", version, about = "omafanctrl fan control daemon")]
@@ -37,6 +43,13 @@ struct Args {
     /// Control-loop interval, in seconds.
     #[arg(long, default_value_t = DEFAULT_INTERVAL_SECS)]
     interval: u64,
+
+    /// Telemetry sampling interval, in milliseconds.
+    ///
+    /// Telemetry drives the GUI temperature history. A larger value reduces
+    /// idle CPU wakeups at the cost of a less responsive history.
+    #[arg(long, default_value_t = DEFAULT_TELEMETRY_INTERVAL_MS)]
+    telemetry_interval_ms: u64,
 
     /// Revert the fan to BIOS auto control and exit.
     ///
@@ -59,7 +72,8 @@ async fn main() -> Result<()> {
         .context("failed to open the EC; is `ec_sys write_support=1` loaded?")?;
     let ec = Ec::new(backend);
 
-    let mut daemon = Daemon::new(ec, config, args.config.clone());
+    let mut daemon = Daemon::new(ec, config, args.config.clone())
+        .with_telemetry_interval(Duration::from_millis(args.telemetry_interval_ms.max(1)));
     let control = Control::new(daemon.control_service());
 
     let connection = dbus::serve(control)

@@ -1,0 +1,25 @@
+[package]
+name = "omafanctrl-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.omafanctrl-core]
+path = "../crates/omafanctrl-core"
+
+# Prevent this crate from being pulled into the parent workspace; cargo-fuzz
+# builds it with a nightly toolchain and its own target directory.
+[workspace]
+
+[[bin]]
+name = "parse_config"
+path = "fuzz_targets/parse_config.rs"
+test = false
+doc = false
+bench = false

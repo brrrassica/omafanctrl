@@ -57,6 +57,7 @@ pub struct Daemon<B: EcBackend> {
     command_tx: mpsc::Sender<Command>,
     commands: mpsc::Receiver<Command>,
     config_path: PathBuf,
+    telemetry_interval: Duration,
 }
 
 impl<B: EcBackend> Daemon<B> {
@@ -78,7 +79,19 @@ impl<B: EcBackend> Daemon<B> {
             command_tx,
             commands,
             config_path,
+            telemetry_interval: TELEMETRY_INTERVAL,
         }
+    }
+
+    /// Override the telemetry sampling interval.
+    ///
+    /// Telemetry drives the GUI's temperature history independently of the
+    /// fan-control cadence. A longer interval reduces idle CPU wakeups at the
+    /// cost of a less responsive history; see `docs/profiling.md`. The interval
+    /// is clamped to at least 1 ms so the ticker can never be zero.
+    pub fn with_telemetry_interval(mut self, interval: Duration) -> Self {
+        self.telemetry_interval = interval.max(Duration::from_millis(1));
+        self
     }
 
     /// The active configuration.
@@ -181,7 +194,7 @@ impl<B: EcBackend> Daemon<B> {
     ) -> Result<(), EngineError> {
         // Sample and publish at the fast telemetry cadence; evaluate the fan
         // control decision only once per `interval`.
-        let mut ticker = tokio::time::interval(TELEMETRY_INTERVAL);
+        let mut ticker = tokio::time::interval(self.telemetry_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_control: Option<Instant> = None;
         loop {
@@ -494,5 +507,26 @@ mod tests {
 
         assert_eq!(control_register(&bytes), 3);
         assert_eq!(service.get_state().mode, "smart");
+    }
+
+    #[test]
+    fn telemetry_interval_is_clamped_to_at_least_one_millisecond() {
+        let (backend, _bytes) = SharedBackend::new();
+        let daemon = Daemon::new(
+            ec(backend),
+            smart_config(),
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        )
+        .with_telemetry_interval(Duration::ZERO);
+        assert_eq!(daemon.telemetry_interval, Duration::from_millis(1));
+
+        let (backend, _bytes) = SharedBackend::new();
+        let daemon = Daemon::new(
+            ec(backend),
+            smart_config(),
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        )
+        .with_telemetry_interval(Duration::from_secs(2));
+        assert_eq!(daemon.telemetry_interval, Duration::from_secs(2));
     }
 }
