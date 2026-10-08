@@ -7,3 +7,4 @@ license.workspace = true
 description = "Shared library for omafanctrl: EC protocol, config, and control engine"
 
 [dependencies]
+thiserror.workspace = true

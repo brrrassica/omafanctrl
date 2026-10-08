@@ -11,6 +11,7 @@
 pub mod config;
 pub mod ec;
 pub mod engine;
+pub mod probe;
 
 /// The crate version, sourced from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

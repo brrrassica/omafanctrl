@@ -38,6 +38,17 @@ cargo build --release
   modprobe ec_sys write_support=1
   ```
 
+## Probing the EC
+
+Before trusting the register map, inspect the live EC with the read-only probe:
+
+```sh
+sudo cargo run -p omafanctrl-core --bin omafanctrl-probe
+```
+
+It dumps all 256 register bytes and decodes the known fan and temperature
+registers. Writing requires an explicit `--force` flag.
+
 ## Safety
 
 `omafanctrl` writes directly to the Embedded Controller. A watchdog always
