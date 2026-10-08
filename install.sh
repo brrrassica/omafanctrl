@@ -38,8 +38,6 @@ readonly PROBE_BIN="omafanctrl-probe"
 readonly CONFIG_DIR="/etc/omafanctrl"
 readonly CONFIG_FILE="$CONFIG_DIR/TPFanControl.ini"
 
-readonly MARKER_HYPR="# >>> omafanctrl (managed by install.sh) >>>"
-readonly MARKER_HYPR_END="# <<< omafanctrl (managed by install.sh) <<<"
 readonly MARKER_WAYBAR="/* >>> omafanctrl (managed by install.sh) >>> */"
 
 # ---------------------------------------------------------------------------
@@ -333,10 +331,12 @@ setup_user_integration() {
       ok "Hyprland bindings already present"
     else
       info "Adding Hyprland keybindings to $bindings"
+      # NOTE: bindings.lua is Lua, where '#' is not a comment. Do not emit the
+      # shell-style markers here; the appended content already contains
+      # "omafanctrl", which is what the idempotency check above greps for.
       {
-        printf '\n%s\n' "$MARKER_HYPR"
+        printf '\n'
         cat "$DATA_DIR/hyprland/bindings.lua"
-        printf '%s\n' "$MARKER_HYPR_END"
       } >> "$bindings"
       chown "$TARGET_USER:$TARGET_USER" "$bindings" 2>/dev/null || true
       ok "Hyprland bindings appended"
