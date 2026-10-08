@@ -4,11 +4,19 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "CLI client for omafanctrl, designed for Hyprland hotkeys"
+description = "CLI client and Waybar module for omafanctrl"
+
+[lib]
+name = "omafanctrl_cli"
+path = "src/lib.rs"
 
 [[bin]]
 name = "omafanctrl"
 path = "src/main.rs"
+
+[[bin]]
+name = "omafanctrl-waybar"
+path = "src/bin/omafanctrl-waybar.rs"
 
 [dependencies]
 omafanctrl-core.workspace = true

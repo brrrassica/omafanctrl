@@ -18,71 +18,60 @@ adaptive interface that feels native under Hyprland tiling.
 | `omafanctrl` | CLI client for scripting and Hyprland `SUPER + <key>` hotkeys |
 | Waybar module | Renders fan state in the Omarchy Quattro bar |
 
-## Status
-
-Early development. The project is being built milestone by milestone;
-Contributions are currently NOT open.
-
-## Building
-
-```sh
-cargo build --release
-```
-
 ## Requirements
 
 - Arch Linux / Omarchy Quattro (4.x)
 - The `ec_sys` kernel module with write support:
 
   ```sh
-  modprobe ec_sys write_support=1
+  sudo modprobe ec_sys write_support=1
   ```
 
-## Probing the EC
+## Running
 
-Before trusting the register map, inspect the live EC with the read-only probe:
-
-```sh
-sudo cargo run -p omafanctrl-core --bin omafanctrl-probe
-```
-
-It dumps all 256 register bytes, decodes the known fan and temperature registers,
-and reports the realtime fan speed from `/proc/acpi/ibm/fan` (`thinkpad_acpi`)
-alongside the EC tachometer. Writing requires an explicit `--force` flag.
-
-To re-measure the fan curve on real hardware, sweep every manual level:
+### 1. Build
 
 ```sh
-sudo cargo run -p omafanctrl-core --bin omafanctrl-probe -- --sweep --force
+cargo build --release
 ```
 
-The sweep records the RPM at each level, compares it against the known curve, and
-always restores BIOS auto control when it finishes.
+This produces all four binaries in `target/release/`.
 
-## Daemon and D-Bus
-
-`omafanctrld` is the only component that writes to the EC. It runs the control
-loop and serves the `org.omarchy.omafanctrl` interface on the **system bus** at
-`/org/omarchy/omafanctrl`:
-
-| Method | Purpose |
-| --- | --- |
-| `GetState` | A snapshot (mode, levels, RPM, temperatures) |
-| `SetMode` | Switch between `bios`, `manual`, and `smart` |
-| `SetManualLevel` | Set the manual fan level |
-| `SetHysteresis` | Enable or disable smart-mode hysteresis |
-| `GetConfig` / `SetConfig` | Read or replace the `.ini` configuration |
-| `ReloadConfig` | Re-read the configuration file from disk |
-
-It also emits the `StateChanged` and `ConfigChanged` signals.
-
-Run it directly (as root, with `ec_sys write_support=1` loaded):
+### 2. Load the EC module
 
 ```sh
-sudo ./target/debug/omafanctrld --config data/profiles/e14-gen4.ini
+sudo modprobe ec_sys write_support=1
 ```
 
-### System integration files
+### 3. Start the daemon
+
+The daemon is the only component that writes to the EC, so it must run as root
+and be started first. It serves `org.omarchy.omafanctrl` on the **system bus** at
+`/org/omarchy/omafanctrl`.
+
+```sh
+sudo ./target/release/omafanctrld --config data/profiles/e14-gen4.ini
+```
+
+Flags:
+
+- `--config <path>` / `-c` — config file (default `/etc/omafanctrl/TPFanControl.ini`)
+- `--interval <secs>` — control-loop interval (default `5`)
+- `--revert` — hand the fan back to BIOS auto and exit
+
+### 4. Use a client
+
+With the daemon running, the CLI, GUI, and Waybar module talk to it over D-Bus.
+
+```sh
+./target/release/omafanctrl status
+./target/release/omafanctrl-gui
+./target/release/omafanctrl-waybar --show icon,mode,rpm,temp
+```
+
+### Install as a system service
+
+Install the system integration files and enable the unit:
 
 | File | Install to |
 | --- | --- |
@@ -92,9 +81,10 @@ sudo ./target/debug/omafanctrld --config data/profiles/e14-gen4.ini
 | [`data/modules-load.d/ec_sys.conf`](data/modules-load.d/ec_sys.conf) | `/etc/modules-load.d/` |
 | [`data/modprobe.d/ec_sys.conf`](data/modprobe.d/ec_sys.conf) | `/etc/modprobe.d/` |
 
-The systemd unit's `ExecStopPost=/usr/bin/omafanctrld --revert` is a safety net
-that hands the fan back to the firmware even after `kill -9`, when the in-process
-watchdog cannot run.
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now omafanctrld
+```
 
 ## CLI
 
@@ -148,7 +138,7 @@ shown by `omarchy menu keybindings --print`.
 column at narrow tiling widths, and follows the system light/dark theme.
 
 ```sh
-./target/debug/omafanctrl-gui
+./target/release/omafanctrl-gui
 ```
 
 Pages:
@@ -163,25 +153,47 @@ Live data is pushed from the daemon's `StateChanged`/`ConfigChanged` signals; if
 the daemon is unreachable the app shows an `AdwStatusPage` and surfaces errors as
 `AdwToast` notifications.
 
-## Fan curve
+## Waybar module
 
-The E14 Gen 4 fan is not linear in the EC fan-control level. The observed curve
-(see [`config/E14G4-quirks`](config/E14G4-quirks)) is:
+`omafanctrl-waybar` is a Waybar `custom` module that queries the daemon and
+prints Waybar JSON (`text`, `tooltip`, `class`, `alt`). The `class` is the
+current mode (`bios`, `manual`, `smart`) or `error`, so the bar can be styled
+per mode.
 
-| Level | RPM |
-| --- | --- |
-| 1 | 1800 |
-| 2 | 2200 |
-| 3–7 | 3900 |
+```sh
+omafanctrl-waybar --show icon,mode,rpm,temp --icon ""   # Waybar JSON
+omafanctrl-waybar --show mode,rpm --plain               # plain text
+```
 
-Only levels 1–3 produce distinct speeds; levels 4–7 saturate at the maximum. The
-curve is encoded in `omafanctrl-core::fan_curve` and the shipped profile
-([`data/profiles/e14-gen4.ini`](data/profiles/e14-gen4.ini)) uses levels 1–3.
+`--show` accepts any of `icon`, `mode`, `rpm`, and `temp`.
+
+Add the module to your Waybar config (see
+[`data/waybar/omafanctrl.jsonc`](data/waybar/omafanctrl.jsonc)):
+
+```jsonc
+"custom/omafanctrl": {
+  "exec": "omafanctrl-waybar --show icon,mode,rpm,temp",
+  "return-type": "json",
+  "interval": 2,
+  "on-click": "omafanctrl mode cycle --notify",
+  "on-scroll-up": "omafanctrl level up --notify",
+  "on-scroll-down": "omafanctrl level down --notify"
+}
+```
+
+and append the per-mode colours from
+[`data/waybar/omafanctrl.css`](data/waybar/omafanctrl.css) to your
+`~/.config/waybar/style.css`.
 
 ## Safety
 
 `omafanctrl` writes directly to the Embedded Controller. A watchdog always
 reverts the fan to BIOS auto control when the daemon stops or crashes.
+
+## Development
+
+Technical design, the D-Bus contract, EC register details, the fan curve, and
+the milestone plan live under [`plans/`](plans/README.md).
 
 ## License
 

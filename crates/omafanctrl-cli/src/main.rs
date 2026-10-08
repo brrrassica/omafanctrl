@@ -4,8 +4,6 @@
 //! `SUPER + <key>` hotkeys that switch fan modes. Every command is designed to
 //! return quickly so it never blocks a keybinding.
 
-mod client;
-
 use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
@@ -17,7 +15,7 @@ use omafanctrl_core::ec::{FAN_LEVEL_MAX, FAN_LEVEL_MIN};
 use omafanctrl_core::engine::Mode;
 use serde_json::json;
 
-use crate::client::Client;
+use omafanctrl_cli::client::Client;
 
 /// Control the ThinkPad fan through the `omafanctrl` daemon.
 #[derive(Debug, Parser)]
