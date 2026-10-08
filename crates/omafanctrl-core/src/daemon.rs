@@ -1,12 +1,16 @@
 //! Daemon control loop and lifecycle.
 //!
 //! [`Daemon`] owns the EC handle (through a [`Watchdog`]), the control
-//! [`Engine`], and the active [`Config`]. On every tick it:
+//! [`Engine`], and the active [`Config`]. On every control tick it:
 //!
 //! 1. reloads the configuration if the file changed,
 //! 2. reads the sensor bank,
 //! 3. evaluates the engine and applies the resulting [`Decision`] to the EC,
 //! 4. publishes a [`State`] snapshot for the D-Bus layer.
+//!
+//! Sensor readings are additionally sampled and published at
+//! [`TELEMETRY_INTERVAL`] (4 Hz) so the GUI's temperature history stays fresh,
+//! while the control decision is still evaluated once per configured interval.
 //!
 //! Commands arriving from the D-Bus layer are applied immediately (the daemon
 //! re-evaluates after each command), so a mode change is visible without waiting
@@ -33,6 +37,13 @@ use crate::probe::KNOWN_SENSOR_OFFSETS;
 
 /// The capacity of the command channel between the D-Bus layer and the loop.
 pub const COMMAND_CHANNEL_CAPACITY: usize = 16;
+
+/// The interval at which sensor readings are sampled and published for
+/// telemetry, independent of the fan-control cadence.
+///
+/// 250 ms gives the GUI a 4 Hz temperature history while the control decision
+/// still runs at the configured interval.
+pub const TELEMETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The daemon control loop.
 pub struct Daemon<B: EcBackend> {
@@ -105,10 +116,17 @@ impl<B: EcBackend> Daemon<B> {
         self.config_tx.subscribe()
     }
 
+    /// Read the sensor bank and the fan speed.
+    fn read_sensors(&mut self) -> Result<(Vec<SensorReading>, u16), EngineError> {
+        let readings = read_sensor_readings(self.watchdog.ec_mut(), &self.sensor_offsets)?;
+        let fan_rpm = self.watchdog.ec_mut().read_fan_rpm()?;
+        Ok((readings, fan_rpm))
+    }
+
     /// Run one control iteration.
     pub fn tick(&mut self, now: Instant) -> Result<(), EngineError> {
         self.poll_config();
-        let readings = read_sensor_readings(self.watchdog.ec_mut(), &self.sensor_offsets)?;
+        let (readings, fan_rpm) = self.read_sensors()?;
         let decision = self.engine.decide(&readings, now);
         match apply_decision(self.watchdog.ec_mut(), decision) {
             Ok(()) => self.engine.commit(decision, now),
@@ -122,7 +140,17 @@ impl<B: EcBackend> Daemon<B> {
             }
             Err(error) => return Err(error.into()),
         }
-        let fan_rpm = self.watchdog.ec_mut().read_fan_rpm()?;
+        self.publish_state(&readings, fan_rpm);
+        Ok(())
+    }
+
+    /// Sample the sensors and publish a state snapshot without evaluating
+    /// control.
+    ///
+    /// This drives the fast telemetry cadence so the GUI's temperature history
+    /// stays fresh between control iterations, without touching the fan.
+    pub fn sample(&mut self) -> Result<(), EngineError> {
+        let (readings, fan_rpm) = self.read_sensors()?;
         self.publish_state(&readings, fan_rpm);
         Ok(())
     }
@@ -151,8 +179,11 @@ impl<B: EcBackend> Daemon<B> {
         interval: Duration,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), EngineError> {
-        let mut ticker = tokio::time::interval(interval);
+        // Sample and publish at the fast telemetry cadence; evaluate the fan
+        // control decision only once per `interval`.
+        let mut ticker = tokio::time::interval(TELEMETRY_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_control: Option<Instant> = None;
         loop {
             let received = tokio::select! {
                 _ = ticker.tick() => None,
@@ -165,8 +196,22 @@ impl<B: EcBackend> Daemon<B> {
                 }
             };
             match received {
-                None => self.tick(Instant::now())?,
-                Some(Some(command)) => self.handle_command(command)?,
+                None => {
+                    let now = Instant::now();
+                    let control_due = last_control.is_none_or(|last| {
+                        now.saturating_duration_since(last) >= interval
+                    });
+                    if control_due {
+                        self.tick(now)?;
+                        last_control = Some(now);
+                    } else {
+                        self.sample()?;
+                    }
+                }
+                Some(Some(command)) => {
+                    self.handle_command(command)?;
+                    last_control = Some(Instant::now());
+                }
                 Some(None) => break,
             }
         }
@@ -350,6 +395,31 @@ mod tests {
             .unwrap();
         daemon.handle_command(Command::SetManualLevel(2)).unwrap();
         assert_eq!(control_register(&bytes), 2);
+    }
+
+    #[test]
+    fn sample_publishes_state_without_touching_the_fan() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        set_byte(&bytes, REG_FAN_CONTROL, 3);
+        let mut daemon = Daemon::new(
+            ec(backend),
+            smart_config(),
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+        let mut state_rx = daemon.state_receiver();
+
+        daemon.sample().unwrap();
+
+        // Sampling must not change the fan control register.
+        assert_eq!(control_register(&bytes), 3);
+        let state = state_rx.borrow_and_update().clone();
+        assert!(
+            state
+                .temperatures
+                .iter()
+                .any(|sensor| sensor.name == "cpu" && sensor.celsius == 60)
+        );
     }
 
     #[test]

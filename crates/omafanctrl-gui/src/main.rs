@@ -16,9 +16,9 @@ use std::time::Duration;
 use adw::prelude::*;
 use gtk::glib;
 use omafanctrl_core::config::{Config, SmartMode};
-use omafanctrl_core::dbus::State;
+use omafanctrl_core::dbus::{SensorState, State};
 
-use crate::chart::TemperatureChart;
+use crate::chart::HistoryChart;
 use crate::client::{ClientHandle, Command, Update};
 use crate::curve::CurveEditor;
 
@@ -200,9 +200,11 @@ struct OverviewPage {
     rpm_row: adw::ActionRow,
     hysteresis_row: adw::SwitchRow,
     temps_group: adw::PreferencesGroup,
-    /// Rows currently added to `temps_group`, so they can be removed on rebuild.
-    temp_rows: RefCell<Vec<gtk::Widget>>,
-    chart: TemperatureChart,
+    /// Rows currently added to `temps_group`, keyed by sensor name, so their
+    /// values can be updated in place between rebuilds.
+    temp_rows: RefCell<Vec<(String, gtk::Widget, gtk::Label)>>,
+    chart: HistoryChart,
+    rpm_chart: HistoryChart,
     updating: Rc<Cell<bool>>,
 }
 
@@ -236,8 +238,17 @@ impl OverviewPage {
 
         let chart_group = adw::PreferencesGroup::new();
         chart_group.set_title("Temperature history");
-        let chart = TemperatureChart::new();
+        let chart = HistoryChart::new(
+            &[("CPU", (0.20, 0.60, 1.00)), ("GPU", (1.00, 0.50, 0.20))],
+            20.0,
+            100.0,
+        );
         chart_group.add(chart.widget());
+
+        let rpm_group = adw::PreferencesGroup::new();
+        rpm_group.set_title("Fan speed history");
+        let rpm_chart = HistoryChart::new(&[("Fan", (0.30, 0.80, 0.40))], 0.0, 4500.0);
+        rpm_group.add(rpm_chart.widget());
 
         let temps_group = adw::PreferencesGroup::new();
         temps_group.set_title("Temperatures");
@@ -245,6 +256,7 @@ impl OverviewPage {
         root.add(&status_group);
         root.add(&mode_group);
         root.add(&chart_group);
+        root.add(&rpm_group);
         root.add(&temps_group);
 
         let state_for_mode = state.clone();
@@ -290,6 +302,7 @@ impl OverviewPage {
             temps_group,
             temp_rows: RefCell::new(Vec::new()),
             chart,
+            rpm_chart,
             updating,
         }
     }
@@ -312,31 +325,69 @@ impl OverviewPage {
         });
         self.rpm_row.set_subtitle(&format!("{} RPM", state.fan_rpm));
 
-        if let Some(max) = state.temperatures.iter().map(|sensor| sensor.celsius).max() {
-            self.chart.push(f64::from(max));
-        }
+        let cpu = temperature(&state.temperatures, "cpu");
+        let gpu = temperature(&state.temperatures, "gpu");
+        self.chart.push(&[cpu, gpu]);
+        self.rpm_chart.push(&[Some(f64::from(state.fan_rpm))]);
 
-        for row in self.temp_rows.borrow_mut().drain(..) {
-            self.temps_group.remove(&row);
-        }
-        if state.temperatures.is_empty() {
+        self.update_temperatures(&state.temperatures);
+    }
+
+    /// Rebuild the temperature rows when the sensor set changes, otherwise
+    /// update the existing rows in place so the fast refresh does not churn
+    /// widgets.
+    fn update_temperatures(&self, sensors: &[SensorState]) {
+        let mut rows = self.temp_rows.borrow_mut();
+
+        if sensors.is_empty() {
+            if rows.len() == 1 && rows[0].0.is_empty() {
+                return;
+            }
+            for (_, row, _) in rows.drain(..) {
+                self.temps_group.remove(&row);
+            }
             let row = adw::ActionRow::builder()
                 .title("No sensors reported")
                 .build();
             self.temps_group.add(&row);
-            self.temp_rows.borrow_mut().push(row.upcast());
-        } else {
-            for sensor in &state.temperatures {
-                let row = adw::ActionRow::builder()
-                    .title(&sensor.name)
-                    .subtitle(format!("0x{:02X}", sensor.offset))
-                    .build();
-                row.add_suffix(&gtk::Label::new(Some(&format!("{} °C", sensor.celsius))));
-                self.temps_group.add(&row);
-                self.temp_rows.borrow_mut().push(row.upcast());
+            rows.push((String::new(), row.upcast(), gtk::Label::new(None)));
+            return;
+        }
+
+        let same_set = rows.len() == sensors.len()
+            && rows
+                .iter()
+                .zip(sensors)
+                .all(|((name, _, _), sensor)| name == &sensor.name);
+        if same_set {
+            for ((_, _, label), sensor) in rows.iter().zip(sensors) {
+                label.set_text(&format!("{} °C", sensor.celsius));
             }
+            return;
+        }
+
+        for (_, row, _) in rows.drain(..) {
+            self.temps_group.remove(&row);
+        }
+        for sensor in sensors {
+            let row = adw::ActionRow::builder()
+                .title(&sensor.name)
+                .subtitle(format!("0x{:02X}", sensor.offset))
+                .build();
+            let label = gtk::Label::new(Some(&format!("{} °C", sensor.celsius)));
+            row.add_suffix(&label);
+            self.temps_group.add(&row);
+            rows.push((sensor.name.clone(), row.upcast(), label));
         }
     }
+}
+
+/// The temperature of the named sensor, if present.
+fn temperature(sensors: &[SensorState], name: &str) -> Option<f64> {
+    sensors
+        .iter()
+        .find(|sensor| sensor.name == name)
+        .map(|sensor| f64::from(sensor.celsius))
 }
 
 /// The Smart Curve page: a draggable curve plus precise threshold editors.
@@ -371,7 +422,8 @@ impl CurvePage {
 
         let state_for_editor = state.clone();
         editor.connect_changed(move |levels| {
-            if let Some(mut config) = state_for_editor.config.borrow().clone() {
+            let config = state_for_editor.config.borrow().clone();
+            if let Some(mut config) = config {
                 match config.smart_modes.first_mut() {
                     Some(mode) => mode.levels = levels,
                     None => config.smart_modes.push(SmartMode {
@@ -422,7 +474,8 @@ impl CurvePage {
                 if updating.get() {
                     return;
                 }
-                if let Some(mut config) = state_for_row.config.borrow().clone() {
+                let config = state_for_row.config.borrow().clone();
+                if let Some(mut config) = config {
                     if let Some(mode) = config.smart_modes.first_mut() {
                         if let Some(level) = mode.levels.get_mut(index) {
                             level.temperature = row.value().round().clamp(0.0, 127.0) as u8;
@@ -499,7 +552,8 @@ impl SensorsPage {
             let state_for_switch = self.state.clone();
             let name_for_switch = name.clone();
             switch.connect_active_notify(move |row| {
-                if let Some(mut config) = state_for_switch.config.borrow().clone() {
+                let config = state_for_switch.config.borrow().clone();
+                if let Some(mut config) = config {
                     if row.is_active() {
                         config
                             .sensors
@@ -527,7 +581,8 @@ impl SensorsPage {
             let state_for_entry = self.state.clone();
             let name_for_entry = name.clone();
             entry.connect_apply(move |entry| {
-                if let Some(mut config) = state_for_entry.config.borrow().clone() {
+                let config = state_for_entry.config.borrow().clone();
+                if let Some(mut config) = config {
                     let display = entry.text().to_string();
                     if let Some((sequence, _)) = config
                         .sensors
@@ -605,7 +660,8 @@ impl SettingsPage {
             if updating_for_cycle.get() {
                 return;
             }
-            if let Some(mut config) = state_for_cycle.config.borrow().clone() {
+            let config = state_for_cycle.config.borrow().clone();
+            if let Some(mut config) = config {
                 config.general.cycle = row.value().round().max(1.0) as u32;
                 state_for_cycle.set_config(&config);
             }
@@ -617,7 +673,8 @@ impl SettingsPage {
             if updating_for_start.get() {
                 return;
             }
-            if let Some(mut config) = state_for_start.config.borrow().clone() {
+            let config = state_for_start.config.borrow().clone();
+            if let Some(mut config) = config {
                 config.general.start_minimized = row.is_active();
                 state_for_start.set_config(&config);
             }
