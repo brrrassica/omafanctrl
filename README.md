@@ -46,8 +46,33 @@ Before trusting the register map, inspect the live EC with the read-only probe:
 sudo cargo run -p omafanctrl-core --bin omafanctrl-probe
 ```
 
-It dumps all 256 register bytes and decodes the known fan and temperature
-registers. Writing requires an explicit `--force` flag.
+It dumps all 256 register bytes, decodes the known fan and temperature registers,
+and reports the realtime fan speed from `/proc/acpi/ibm/fan` (`thinkpad_acpi`)
+alongside the EC tachometer. Writing requires an explicit `--force` flag.
+
+To re-measure the fan curve on real hardware, sweep every manual level:
+
+```sh
+sudo cargo run -p omafanctrl-core --bin omafanctrl-probe -- --sweep --force
+```
+
+The sweep records the RPM at each level, compares it against the known curve, and
+always restores BIOS auto control when it finishes.
+
+## Fan curve
+
+The E14 Gen 4 fan is not linear in the EC fan-control level. The observed curve
+(see [`config/E14G4-quirks`](config/E14G4-quirks)) is:
+
+| Level | RPM |
+| --- | --- |
+| 1 | 1800 |
+| 2 | 2200 |
+| 3–7 | 3900 |
+
+Only levels 1–3 produce distinct speeds; levels 4–7 saturate at the maximum. The
+curve is encoded in `omafanctrl-core::fan_curve` and the shipped profile
+([`data/profiles/e14-gen4.ini`](data/profiles/e14-gen4.ini)) uses levels 1–3.
 
 ## Safety
 

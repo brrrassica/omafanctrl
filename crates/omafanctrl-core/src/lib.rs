@@ -11,7 +11,9 @@
 pub mod config;
 pub mod ec;
 pub mod engine;
+pub mod fan_curve;
 pub mod probe;
+pub mod thinkpad_acpi;
 
 /// The crate version, sourced from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

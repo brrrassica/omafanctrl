@@ -107,9 +107,17 @@ pub const FAN_LEVEL_MIN: u8 = 0x01;
 
 /// Highest valid manual fan level.
 ///
-/// TPFanCtrl2 accepts `0x00`–`0x07`. On the E14 Gen 4 the fan reaches its
-/// maximum (≈3900 RPM) at level 3; levels 4–7 are "advanced" raw values that
-/// behave non-linearly, so prefer 2–3.
+/// TPFanCtrl2 accepts `0x00`–`0x07`. On the E14 Gen 4 the observed curve is
+/// highly non-linear (see [`crate::fan_curve`] and `config/E14G4-quirks`):
+///
+/// | Level | RPM |
+/// | --- | --- |
+/// | 1 | 1800 |
+/// | 2 | 2200 |
+/// | 3–7 | 3900 |
+///
+/// The fan reaches its maximum (3900 RPM) at level 3; levels 4–7 are redundant
+/// and only waste power, so prefer 1–3.
 pub const FAN_LEVEL_MAX: u8 = 0x07;
 
 /// Highest temperature (°C) accepted from a sensor before it is rejected.

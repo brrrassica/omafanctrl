@@ -8,6 +8,7 @@ use crate::ec::{
     EC_WINDOW_SIZE, Ec, EcBackend, EcError, FAN_BIOS_AUTO, FAN_DISENGAGED, FAN_LEVEL_MAX,
     REG_FAN_CONTROL, REG_FAN_RPM_HIGH, REG_FAN_RPM_LOW, TEMP_MAX_C, TemperatureReading,
 };
+use crate::thinkpad_acpi::FanStatus;
 
 /// Temperature sensor offsets documented for the E14 Gen 4.
 ///
@@ -25,10 +26,16 @@ pub struct ProbeReport {
     pub window: [u8; EC_WINDOW_SIZE],
     /// The raw fan control register value.
     pub fan_control: u8,
-    /// The decoded fan speed in RPM.
+    /// The decoded fan speed in RPM, from the EC tachometer registers.
     pub fan_rpm: u16,
     /// The decoded temperature sensors (implausible values omitted).
     pub temperatures: Vec<TemperatureReading>,
+    /// The realtime fan status from `/proc/acpi/ibm/fan`, when available.
+    ///
+    /// This is a second, independent view of the fan speed (see
+    /// [`crate::thinkpad_acpi`]) and is `None` when the interface is absent or
+    /// was not read.
+    pub acpi_fan: Option<FanStatus>,
 }
 
 impl ProbeReport {
@@ -50,7 +57,22 @@ impl ProbeReport {
 }
 
 /// Take a read-only snapshot of the EC.
+///
+/// The `thinkpad_acpi` fan status is not read; use [`probe_with_acpi`] to attach
+/// it.
 pub fn probe<B: EcBackend>(ec: &mut Ec<B>) -> Result<ProbeReport, EcError> {
+    probe_with_acpi(ec, None)
+}
+
+/// Take a read-only snapshot of the EC, attaching a `thinkpad_acpi` fan status.
+///
+/// The caller reads `/proc/acpi/ibm/fan` (see
+/// [`crate::thinkpad_acpi::read_fan_status`]) and passes the result in, keeping
+/// this function free of file I/O and easy to test.
+pub fn probe_with_acpi<B: EcBackend>(
+    ec: &mut Ec<B>,
+    acpi_fan: Option<FanStatus>,
+) -> Result<ProbeReport, EcError> {
     let window = ec.read_window()?;
     let fan_control = window[usize::from(REG_FAN_CONTROL)];
     let fan_rpm = (u16::from(window[usize::from(REG_FAN_RPM_HIGH)]) << 8)
@@ -67,6 +89,7 @@ pub fn probe<B: EcBackend>(ec: &mut Ec<B>) -> Result<ProbeReport, EcError> {
         fan_control,
         fan_rpm,
         temperatures,
+        acpi_fan,
     })
 }
 
@@ -101,6 +124,13 @@ pub fn format_report(report: &ProbeReport) -> String {
         "Fan RPM (0x{REG_FAN_RPM_HIGH:02X}:0x{REG_FAN_RPM_LOW:02X}): {}\n",
         report.fan_rpm
     ));
+    match &report.acpi_fan {
+        Some(fan) => out.push_str(&format!(
+            "thinkpad_acpi fan (/proc/acpi/ibm/fan): status {}, speed {} RPM, level {}\n",
+            fan.status, fan.speed, fan.level
+        )),
+        None => out.push_str("thinkpad_acpi fan (/proc/acpi/ibm/fan): unavailable\n"),
+    }
     out.push_str("Temperature sensors:\n");
     if report.temperatures.is_empty() {
         out.push_str("  (none in range)\n");
@@ -133,6 +163,15 @@ pub fn format_json(report: &ProbeReport) -> String {
         report.fan_control_description()
     ));
     out.push_str(&format!("  \"fan_rpm\": {},\n", report.fan_rpm));
+    match &report.acpi_fan {
+        Some(fan) => out.push_str(&format!(
+            "  \"acpi_fan\": {{\"status\": \"{}\", \"speed\": {}, \"level\": \"{}\"}},\n",
+            json_escape(&fan.status),
+            fan.speed,
+            json_escape(&fan.level)
+        )),
+        None => out.push_str("  \"acpi_fan\": null,\n"),
+    }
     out.push_str("  \"temperatures\": [");
     for (index, reading) in report.temperatures.iter().enumerate() {
         if index > 0 {
@@ -145,6 +184,23 @@ pub fn format_json(report: &ProbeReport) -> String {
     }
     out.push_str("]\n}\n");
     out
+}
+
+/// Escape a string for inclusion in a JSON string literal.
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => escaped.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]
@@ -214,5 +270,29 @@ mod tests {
         assert!(text.contains("BIOS controlled"));
         let json = format_json(&report);
         assert!(json.contains(&format!("\"fan_control\": {}", FAN_BIOS_AUTO)));
+        // Without an ACPI status the report says so and JSON emits null.
+        assert!(text.contains("thinkpad_acpi fan"));
+        assert!(json.contains("\"acpi_fan\": null"));
+    }
+
+    #[test]
+    fn attaches_acpi_fan_status() {
+        let mut backend = MockBackend::default();
+        backend.bytes[usize::from(REG_FAN_CONTROL)] = 3;
+        backend.bytes[usize::from(REG_FAN_RPM_LOW)] = 0x3C;
+        backend.bytes[usize::from(REG_FAN_RPM_HIGH)] = 0x0F; // 3900
+        let mut ec = Ec::new(backend);
+        let acpi =
+            crate::thinkpad_acpi::parse_fan_status("status: enabled\nspeed: 3900\nlevel: 7\n")
+                .unwrap();
+        let report = probe_with_acpi(&mut ec, Some(acpi)).unwrap();
+        assert_eq!(report.fan_rpm, 3900);
+        assert_eq!(report.acpi_fan.as_ref().unwrap().speed, 3900);
+        let text = format_report(&report);
+        assert!(text.contains("status enabled, speed 3900 RPM, level 7"));
+        let json = format_json(&report);
+        assert!(json.contains(
+            "\"acpi_fan\": {\"status\": \"enabled\", \"speed\": 3900, \"level\": \"7\"}"
+        ));
     }
 }

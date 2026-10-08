@@ -1,0 +1,16 @@
+Here are the observed fan speeds of each register value:
+
+1 -> 1800 RPM
+2 -> 2200 RPM
+3 -> 3900 RPM
+4 -> 3900 RPM 
+5 -> 3900 RPM
+6 -> 3900 RPM
+7 -> 3900 RPM
+
+Here is the command, and the output:
+
+cat /proc/acpi/ibm/fan
+status:         enabled
+speed:          3900
+level:          7
