@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=omafanctrl
+GenericName=Fan Control
+Comment=Control the ThinkPad fan
+Exec=omafanctrl-gui
+Icon=org.omarchy.omafanctrl
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=fan;thermal;thinkpad;cooling;temperature;
+StartupNotify=true

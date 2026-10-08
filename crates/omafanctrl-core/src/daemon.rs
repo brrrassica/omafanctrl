@@ -198,9 +198,8 @@ impl<B: EcBackend> Daemon<B> {
             match received {
                 None => {
                     let now = Instant::now();
-                    let control_due = last_control.is_none_or(|last| {
-                        now.saturating_duration_since(last) >= interval
-                    });
+                    let control_due = last_control
+                        .is_none_or(|last| now.saturating_duration_since(last) >= interval);
                     if control_due {
                         self.tick(now)?;
                         last_control = Some(now);

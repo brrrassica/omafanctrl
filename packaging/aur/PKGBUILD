@@ -1,0 +1,71 @@
+# Maintainer: omafanctrl contributors <https://github.com/omafanctrl/omafanctrl>
+#
+# AUR package for omafanctrl (git version).
+#
+# Builds the whole Cargo workspace and installs the daemon, CLI, Waybar module,
+# and GUI, together with the D-Bus policy, polkit action, systemd unit, and the
+# ec_sys module drop-ins.
+
+pkgname=omafanctrl-git
+pkgver=r0.0.0
+pkgrel=1
+pkgdesc="Modern fan control suite for the ThinkPad E14 Gen 4 on Omarchy Quattro"
+arch=('x86_64')
+url="https://github.com/omafanctrl/omafanctrl"
+license=('MIT')
+depends=('gtk4' 'libadwaita' 'dbus' 'polkit')
+makedepends=('cargo' 'git' 'pkgconf')
+provides=('omafanctrl')
+conflicts=('omafanctrl')
+backup=('etc/omafanctrl/TPFanControl.ini')
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$pkgname"
+  cargo build --release --locked --workspace
+}
+
+package() {
+  cd "$pkgname"
+
+  # Binaries.
+  install -Dm755 target/release/omafanctrld "$pkgdir/usr/bin/omafanctrld"
+  install -Dm755 target/release/omafanctrl "$pkgdir/usr/bin/omafanctrl"
+  install -Dm755 target/release/omafanctrl-waybar "$pkgdir/usr/bin/omafanctrl-waybar"
+  install -Dm755 target/release/omafanctrl-gui "$pkgdir/usr/bin/omafanctrl-gui"
+
+  # System integration.
+  install -Dm644 data/dbus/org.omarchy.omafanctrl.conf \
+    "$pkgdir/usr/share/dbus-1/system.d/org.omarchy.omafanctrl.conf"
+  install -Dm644 data/polkit/org.omarchy.omafanctrl.policy \
+    "$pkgdir/usr/share/polkit-1/actions/org.omarchy.omafanctrl.policy"
+  install -Dm644 data/systemd/omafanctrld.service \
+    "$pkgdir/usr/lib/systemd/system/omafanctrld.service"
+  install -Dm644 data/modules-load.d/ec_sys.conf \
+    "$pkgdir/usr/lib/modules-load.d/ec_sys.conf"
+  install -Dm644 data/modprobe.d/ec_sys.conf \
+    "$pkgdir/usr/lib/modprobe.d/ec_sys.conf"
+
+  # Desktop entry and icon.
+  install -Dm644 data/desktop/org.omarchy.omafanctrl.desktop \
+    "$pkgdir/usr/share/applications/org.omarchy.omafanctrl.desktop"
+  install -Dm644 data/icons/org.omarchy.omafanctrl.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/org.omarchy.omafanctrl.svg"
+
+  # Default configuration (marked as a backup file above).
+  install -Dm644 data/profiles/e14-gen4.ini \
+    "$pkgdir/etc/omafanctrl/TPFanControl.ini"
+
+  # Documentation.
+  install -Dm644 README.md "$pkgdir/usr/share/doc/omafanctrl/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/omafanctrl/LICENSE"
+  for doc in docs/*.md; do
+    install -Dm644 "$doc" "$pkgdir/usr/share/doc/omafanctrl/$(basename "$doc")"
+  done
+}

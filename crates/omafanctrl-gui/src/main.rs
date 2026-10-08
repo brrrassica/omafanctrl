@@ -171,6 +171,7 @@ fn build_ui(app: &adw::Application) {
                 Update::Config(text) => match text.parse::<Config>() {
                     Ok(config) => {
                         *state_for_updates.config.borrow_mut() = Some(config.clone());
+                        overview.apply_config(&config);
                         curve_page.apply_config(&config);
                         sensors_page.apply_config(&config);
                         settings_page.apply_config(&config);
@@ -206,6 +207,10 @@ struct OverviewPage {
     chart: HistoryChart,
     rpm_chart: HistoryChart,
     updating: Rc<Cell<bool>>,
+    /// The most recent sensor snapshot, replayed when the ignore list changes.
+    last_temps: RefCell<Vec<SensorState>>,
+    /// Shared state, used to read the current `IgnoreSensors` list.
+    state: AppState,
 }
 
 impl OverviewPage {
@@ -304,6 +309,8 @@ impl OverviewPage {
             chart,
             rpm_chart,
             updating,
+            last_temps: RefCell::new(Vec::new()),
+            state: state.clone(),
         }
     }
 
@@ -330,7 +337,15 @@ impl OverviewPage {
         self.chart.push(&[cpu, gpu]);
         self.rpm_chart.push(&[Some(f64::from(state.fan_rpm))]);
 
+        *self.last_temps.borrow_mut() = state.temperatures.clone();
         self.update_temperatures(&state.temperatures);
+    }
+
+    /// Rebuild the temperature rows when the ignore list changes, so sensors
+    /// disabled in the configuration disappear from the overview immediately.
+    fn apply_config(&self, _config: &Config) {
+        let temps = self.last_temps.borrow().clone();
+        self.update_temperatures(&temps);
     }
 
     /// Rebuild the temperature rows when the sensor set changes, otherwise
@@ -338,6 +353,13 @@ impl OverviewPage {
     /// widgets.
     fn update_temperatures(&self, sensors: &[SensorState]) {
         let mut rows = self.temp_rows.borrow_mut();
+
+        // Sensors listed in `IgnoreSensors` are hidden from the overview.
+        let config = self.state.config.borrow();
+        let sensors: Vec<&SensorState> = sensors
+            .iter()
+            .filter(|sensor| !sensor_is_ignored(config.as_ref(), sensor))
+            .collect();
 
         if sensors.is_empty() {
             if rows.len() == 1 && rows[0].0.is_empty() {
@@ -357,10 +379,10 @@ impl OverviewPage {
         let same_set = rows.len() == sensors.len()
             && rows
                 .iter()
-                .zip(sensors)
+                .zip(&sensors)
                 .all(|((name, _, _), sensor)| name == &sensor.name);
         if same_set {
-            for ((_, _, label), sensor) in rows.iter().zip(sensors) {
+            for ((_, _, label), sensor) in rows.iter().zip(&sensors) {
                 label.set_text(&format!("{} °C", sensor.celsius));
             }
             return;
@@ -369,7 +391,7 @@ impl OverviewPage {
         for (_, row, _) in rows.drain(..) {
             self.temps_group.remove(&row);
         }
-        for sensor in sensors {
+        for sensor in &sensors {
             let row = adw::ActionRow::builder()
                 .title(&sensor.name)
                 .subtitle(format!("0x{:02X}", sensor.offset))
@@ -380,6 +402,22 @@ impl OverviewPage {
             rows.push((sensor.name.clone(), row.upcast(), label));
         }
     }
+}
+
+/// Whether a sensor is excluded by the configuration's `IgnoreSensors` list.
+///
+/// Entries may be sensor names (e.g. `pwr`) or hex register offsets
+/// (e.g. `x7d`), matching the engine's ignore semantics.
+fn sensor_is_ignored(config: Option<&Config>, sensor: &SensorState) -> bool {
+    let Some(config) = config else {
+        return false;
+    };
+    let name = sensor.name.to_ascii_lowercase();
+    let offset_key = format!("x{:02x}", sensor.offset);
+    config.sensors.ignore.iter().any(|entry| {
+        let entry = entry.trim().to_ascii_lowercase();
+        entry == name || entry == offset_key
+    })
 }
 
 /// The temperature of the named sensor, if present.
@@ -718,5 +756,24 @@ mod tests {
         }
         assert_eq!(mode_index("unknown"), 0);
         assert_eq!(mode_name(99), "bios");
+    }
+
+    #[test]
+    fn ignored_sensors_are_hidden_by_name_or_offset() {
+        let config: Config = "IgnoreSensors=pwr,x7d\n".parse().unwrap();
+        let sensor = |name: &str, offset: u8| SensorState {
+            name: name.to_string(),
+            offset,
+            celsius: 40,
+        };
+
+        // Ignored by name.
+        assert!(sensor_is_ignored(Some(&config), &sensor("pwr", 0xC0)));
+        // Ignored by hex register offset.
+        assert!(sensor_is_ignored(Some(&config), &sensor("no5", 0x7D)));
+        // Not ignored.
+        assert!(!sensor_is_ignored(Some(&config), &sensor("cpu", 0x78)));
+        // Without a loaded config nothing is hidden.
+        assert!(!sensor_is_ignored(None, &sensor("pwr", 0xC0)));
     }
 }

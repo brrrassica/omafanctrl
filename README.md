@@ -203,15 +203,29 @@ and append the per-mode colours from
 [`data/waybar/omafanctrl.css`](data/waybar/omafanctrl.css) to your
 `~/.config/waybar/style.css`.
 
+## Documentation
+
+- [Install](docs/install.md) — AUR, manual, and AppImage
+- [Configuration](docs/configuration.md) — the `.ini` format and sections
+- [Modes](docs/modes.md) — BIOS, Manual, Smart, hysteresis, safety limits
+- [Safety](docs/safety.md) — what is protected and the watchdog
+- [Troubleshooting](docs/troubleshooting.md) — ec_sys, debugfs, permissions
+
+## Packaging
+
+- **AUR** — [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD) builds the whole
+  workspace and installs the daemon, CLI, Waybar module, GUI, and all system
+  files.
+- **AppImage** — [`packaging/appimage/build.sh`](packaging/appimage/build.sh)
+  bundles the GUI and CLI clients. The privileged daemon must be installed
+  separately; see the
+  [AppImage caveat](docs/install.md#daemon-caveat-for-appimage-users).
+
 ## Safety
 
 `omafanctrl` writes directly to the Embedded Controller. A watchdog always
-reverts the fan to BIOS auto control when the daemon stops or crashes.
-
-## Development
-
-Technical design, the D-Bus contract, EC register details, the fan curve, and
-the milestone plan live under [`plans/`](plans/README.md).
+reverts the fan to BIOS auto control when the daemon stops or crashes. See
+[docs/safety.md](docs/safety.md) for the full list of protections.
 
 ## License
 
