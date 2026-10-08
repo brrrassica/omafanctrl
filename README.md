@@ -96,6 +96,51 @@ The systemd unit's `ExecStopPost=/usr/bin/omafanctrld --revert` is a safety net
 that hands the fan back to the firmware even after `kill -9`, when the in-process
 watchdog cannot run.
 
+## CLI
+
+`omafanctrl` is a scriptable D-Bus client. Every call has a timeout, so a
+keybinding never blocks the compositor.
+
+```sh
+omafanctrl status                 # human-readable state
+omafanctrl status --json          # machine-readable state
+omafanctrl mode smart             # set the mode (bios | manual | smart)
+omafanctrl mode cycle             # BIOS -> Manual -> Smart
+omafanctrl toggle                 # alias for `mode cycle`
+omafanctrl level set 3            # set the manual level (1-7)
+omafanctrl level up               # step the level up (switches to Manual)
+omafanctrl level down             # step the level down
+omafanctrl config get             # print the current .ini
+omafanctrl config set new.ini     # validate, persist, and apply (`-` for stdin)
+omafanctrl reload                 # re-read the config file from disk
+omafanctrl hysteresis toggle      # enable/disable smart-mode hysteresis
+```
+
+Add `--json` for machine-readable output and `--notify` to raise a desktop
+notification after a change.
+
+## Hyprland hotkeys (Omarchy Quattro 4.x)
+
+Omarchy Quattro configures Hyprland through **Lua**. Personal keybinding
+overrides live in `~/.config/hypr/bindings.lua`, which is loaded by
+`~/.config/hypr/hyprland.lua` via `require("hypr.bindings")`.
+
+Append the ready-to-paste snippet from
+[`data/hyprland/bindings.lua`](data/hyprland/bindings.lua) to your
+`~/.config/hypr/bindings.lua` (do not replace the file — it may already contain
+your own overrides):
+
+```lua
+o.bind("SUPER + F1", "Fan: cycle mode", "omafanctrl mode cycle --notify")
+o.bind("SUPER + SHIFT + F1", "Fan: toggle mode", "omafanctrl toggle --notify")
+o.bind("SUPER + F2", "Fan: level up", "omafanctrl level up --notify")
+o.bind("SUPER + SHIFT + F2", "Fan: level down", "omafanctrl level down --notify")
+o.bind("SUPER + F3", "Fan: status", "omafanctrl status --notify")
+```
+
+`o.bind(keys, description, command)` is the Omarchy helper; the description is
+shown by `omarchy menu keybindings --print`.
+
 ## Fan curve
 
 The E14 Gen 4 fan is not linear in the EC fan-control level. The observed curve
