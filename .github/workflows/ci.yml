@@ -104,24 +104,11 @@ jobs:
           # Zip the bundle (install.sh + prebuilt binaries + data).
           ( cd build && zip -r -q "../omafanctrl.zip" "omafanctrl-$version" )
 
-      - name: Create sources.zip
-        run: |
-          set -euo pipefail
-          git archive --format=zip --prefix="omafanctrl-${{ steps.version.outputs.version }}/" \
-            -o sources.zip HEAD
-
       - name: Upload omafanctrl.zip
         uses: actions/upload-artifact@v4
         with:
           name: omafanctrl.zip
           path: omafanctrl.zip
-          if-no-files-found: error
-
-      - name: Upload sources.zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: sources.zip
-          path: sources.zip
           if-no-files-found: error
 
   release:
@@ -137,15 +124,8 @@ jobs:
         with:
           name: omafanctrl.zip
 
-      - name: Download sources.zip
-        uses: actions/download-artifact@v4
-        with:
-          name: sources.zip
-
       - name: Publish the GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            omafanctrl.zip
-            sources.zip
+          files: omafanctrl.zip
           generate_release_notes: true

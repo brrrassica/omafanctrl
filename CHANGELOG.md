@@ -16,13 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or hardware.
 - **Release bundle** (`omafanctrl.zip`): CI now builds the release binaries and
   packages them together with `install.sh` and the system files, so a release
-  can be installed with a single command. A separate `sources.zip` is published
-  alongside it.
+  can be installed with a single command.
 
 ### Changed
 
-- CI builds and publishes `omafanctrl.zip` and `sources.zip` as build artifacts,
-  and attaches both to tagged GitHub releases.
+- CI builds and publishes `omafanctrl.zip` as a build artifact and attaches it
+  to tagged GitHub releases. Source archives are provided by GitHub itself.
 
 [1.0.1]: https://github.com/omafanctrl/omafanctrl/releases/tag/v1.0.1
 

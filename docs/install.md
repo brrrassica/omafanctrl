@@ -53,9 +53,9 @@ It is idempotent, so re-running it upgrades an existing install in place. Pass
 
 ## From a release tarball (source)
 
-Every release is published on GitHub with a source tarball (`sources.zip`) and a
-binary bundle (`omafanctrl.zip`). To build the latest release (`v1.0.1`) from
-source:
+Every release is published on GitHub with a binary bundle (`omafanctrl.zip`) and
+GitHub's auto-generated source archives. To build the latest release (`v1.0.1`)
+from source:
 
 ```sh
 curl -LO https://github.com/brrrassica/omafanctrl/archive/refs/tags/v1.0.1.tar.gz
