@@ -200,6 +200,8 @@ struct OverviewPage {
     rpm_row: adw::ActionRow,
     hysteresis_row: adw::SwitchRow,
     temps_group: adw::PreferencesGroup,
+    /// Rows currently added to `temps_group`, so they can be removed on rebuild.
+    temp_rows: RefCell<Vec<gtk::Widget>>,
     chart: TemperatureChart,
     updating: Rc<Cell<bool>>,
 }
@@ -286,6 +288,7 @@ impl OverviewPage {
             rpm_row,
             hysteresis_row,
             temps_group,
+            temp_rows: RefCell::new(Vec::new()),
             chart,
             updating,
         }
@@ -313,15 +316,15 @@ impl OverviewPage {
             self.chart.push(f64::from(max));
         }
 
-        while let Some(child) = self.temps_group.first_child() {
-            self.temps_group.remove(&child);
+        for row in self.temp_rows.borrow_mut().drain(..) {
+            self.temps_group.remove(&row);
         }
         if state.temperatures.is_empty() {
-            self.temps_group.add(
-                &adw::ActionRow::builder()
-                    .title("No sensors reported")
-                    .build(),
-            );
+            let row = adw::ActionRow::builder()
+                .title("No sensors reported")
+                .build();
+            self.temps_group.add(&row);
+            self.temp_rows.borrow_mut().push(row.upcast());
         } else {
             for sensor in &state.temperatures {
                 let row = adw::ActionRow::builder()
@@ -330,6 +333,7 @@ impl OverviewPage {
                     .build();
                 row.add_suffix(&gtk::Label::new(Some(&format!("{} °C", sensor.celsius))));
                 self.temps_group.add(&row);
+                self.temp_rows.borrow_mut().push(row.upcast());
             }
         }
     }
@@ -340,6 +344,8 @@ struct CurvePage {
     root: adw::PreferencesPage,
     editor: CurveEditor,
     levels_group: adw::PreferencesGroup,
+    /// Rows currently added to `levels_group`, so they can be removed on rebuild.
+    level_rows: RefCell<Vec<gtk::Widget>>,
     state: AppState,
     updating: Rc<Cell<bool>>,
 }
@@ -382,6 +388,7 @@ impl CurvePage {
             root,
             editor,
             levels_group,
+            level_rows: RefCell::new(Vec::new()),
             state: state.clone(),
             updating,
         }
@@ -399,8 +406,8 @@ impl CurvePage {
             .unwrap_or_default();
         self.editor.set_levels(levels.clone());
 
-        while let Some(child) = self.levels_group.first_child() {
-            self.levels_group.remove(&child);
+        for row in self.level_rows.borrow_mut().drain(..) {
+            self.levels_group.remove(&row);
         }
         for (index, level) in levels.iter().enumerate() {
             let adjustment =
@@ -425,6 +432,7 @@ impl CurvePage {
                 }
             });
             self.levels_group.add(&row);
+            self.level_rows.borrow_mut().push(row.upcast());
         }
     }
 
@@ -435,6 +443,8 @@ impl CurvePage {
 struct SensorsPage {
     root: adw::PreferencesPage,
     group: adw::PreferencesGroup,
+    /// Rows currently added to `group`, so they can be removed on rebuild.
+    rows: RefCell<Vec<gtk::Widget>>,
     state: AppState,
     known: Rc<RefCell<Vec<String>>>,
 }
@@ -451,6 +461,7 @@ impl SensorsPage {
         Self {
             root,
             group,
+            rows: RefCell::new(Vec::new()),
             state: state.clone(),
             known: Rc::new(RefCell::new(Vec::new())),
         }
@@ -473,8 +484,8 @@ impl SensorsPage {
         }
         *self.known.borrow_mut() = names.clone();
 
-        while let Some(child) = self.group.first_child() {
-            self.group.remove(&child);
+        for row in self.rows.borrow_mut().drain(..) {
+            self.group.remove(&row);
         }
         let config = self.state.config.borrow().clone();
         for name in names {
@@ -533,6 +544,7 @@ impl SensorsPage {
             expander.add_row(&entry);
 
             self.group.add(&expander);
+            self.rows.borrow_mut().push(expander.upcast());
         }
     }
 

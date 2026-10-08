@@ -27,6 +27,11 @@ adaptive interface that feels native under Hyprland tiling.
   sudo modprobe ec_sys write_support=1
   ```
 
+- The D-Bus system-bus policy installed so the daemon may own the well-known
+  name `org.omarchy.omafanctrl` (see
+  [step 3](#3-install-the-d-bus-policy)). Without it the daemon exits with
+  `org.freedesktop.DBus.Error.AccessDenied: Request to own name refused by policy`.
+
 ## Running
 
 ### 1. Build
@@ -43,7 +48,20 @@ This produces all four binaries in `target/release/`.
 sudo modprobe ec_sys write_support=1
 ```
 
-### 3. Start the daemon
+### 3. Install the D-Bus policy
+
+The daemon owns the well-known name `org.omarchy.omafanctrl` on the **system
+bus**. The default system-bus policy denies owning any name, so the shipped
+policy must be installed first — otherwise the daemon exits with
+`org.freedesktop.DBus.Error.AccessDenied: Request to own name refused by policy`.
+
+```sh
+sudo install -Dm644 data/dbus/org.omarchy.omafanctrl.conf \
+  /usr/share/dbus-1/system.d/org.omarchy.omafanctrl.conf
+sudo systemctl reload dbus
+```
+
+### 4. Start the daemon
 
 The daemon is the only component that writes to the EC, so it must run as root
 and be started first. It serves `org.omarchy.omafanctrl` on the **system bus** at
@@ -59,7 +77,7 @@ Flags:
 - `--interval <secs>` — control-loop interval (default `5`)
 - `--revert` — hand the fan back to BIOS auto and exit
 
-### 4. Use a client
+### 5. Use a client
 
 With the daemon running, the CLI, GUI, and Waybar module talk to it over D-Bus.
 
