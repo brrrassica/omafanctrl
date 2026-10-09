@@ -13,27 +13,23 @@ jobs:
   # Checks run for branch pushes and pull requests only. Tag pushes skip this
   # job: the tagged commit was already checked when it landed on the branch, so
   # re-running the suite on the tag would just duplicate work.
+  #
+  # The jobs run in an Arch Linux container because the GUI requires
+  # libadwaita >= 1.7, which the ubuntu-latest runner does not provide. Arch is
+  # also the target platform (Omarchy Quattro).
   check:
     name: Format, lint, test, build
     if: "!startsWith(github.ref, 'refs/tags/')"
     runs-on: ubuntu-latest
+    container: archlinux:latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev libdbus-1-dev pkg-config
+          pacman -Syu --noconfirm --needed \
+            base-devel git rust pkgconf gtk4 libadwaita dbus
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Format
         run: cargo fmt --all --check
@@ -52,21 +48,15 @@ jobs:
     name: Build binaries and package
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    container: archlinux:latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev libdbus-1-dev pkg-config zip
+          pacman -Syu --noconfirm --needed \
+            base-devel git rust pkgconf gtk4 libadwaita dbus zip
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Build release binaries
         run: cargo build --release --locked --workspace
