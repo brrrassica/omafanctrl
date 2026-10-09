@@ -13,6 +13,7 @@ use adw::prelude::*;
 use gtk::glib;
 use omafanctrl_core::config::Config;
 use omafanctrl_core::dbus::{SensorState, State};
+use omafanctrl_core::engine::sensor_display_name;
 
 use crate::chart::HistoryChart;
 use crate::client::Command;
@@ -25,6 +26,9 @@ const HALF_MIN_WIDTH: f64 = 600.0;
 /// The width (in `sp`) at or above which the `quarter` layout is used.
 const QUARTER_MIN_WIDTH: f64 = 400.0;
 
+/// A tracked temperature row: `(sensor name, ignored, row widget, value label)`.
+type TempRow = (String, bool, gtk::Widget, gtk::Label);
+
 /// The adaptive dashboard.
 pub struct Dashboard {
     bin: adw::BreakpointBin,
@@ -34,14 +38,17 @@ pub struct Dashboard {
     rpm_row: adw::ActionRow,
     hysteresis_row: adw::SwitchRow,
     temps_group: adw::PreferencesGroup,
-    /// Rows currently added to `temps_group`, keyed by sensor name, so their
-    /// values can be updated in place between rebuilds.
-    temp_rows: RefCell<Vec<(String, gtk::Widget, gtk::Label)>>,
+    /// Rows currently added to `temps_group`, keyed by sensor name and whether
+    /// the sensor is ignored, so their values can be updated in place between
+    /// rebuilds.
+    temp_rows: Rc<RefCell<Vec<TempRow>>>,
     chart: HistoryChart,
     rpm_chart: HistoryChart,
     updating: Rc<Cell<bool>>,
     /// The most recent sensor snapshot, replayed when the ignore list changes.
-    last_temps: RefCell<Vec<SensorState>>,
+    last_temps: Rc<RefCell<Vec<SensorState>>>,
+    /// Whether ignored sensors are shown in the temperatures group.
+    show_hidden: Rc<Cell<bool>>,
     /// Shared state, used to read the current `IgnoreSensors` list.
     state: AppState,
 }
@@ -50,6 +57,8 @@ impl Dashboard {
     /// Build the dashboard.
     pub fn new(state: &AppState) -> Self {
         let updating = Rc::new(Cell::new(false));
+        let temp_rows: Rc<RefCell<Vec<TempRow>>> = Rc::new(RefCell::new(Vec::new()));
+        let last_temps: Rc<RefCell<Vec<SensorState>>> = Rc::new(RefCell::new(Vec::new()));
 
         // Status group.
         let status_group = adw::PreferencesGroup::new();
@@ -92,9 +101,17 @@ impl Dashboard {
         let rpm_chart = HistoryChart::new(&[("Fan", (0.30, 0.80, 0.40))], 0.0, 4500.0);
         rpm_group.add(rpm_chart.widget());
 
-        // Temperatures group.
+        // Temperatures group, with a "Show hidden" toggle for ignored sensors.
         let temps_group = adw::PreferencesGroup::new();
         temps_group.set_title("Temperatures");
+        let show_hidden = Rc::new(Cell::new(false));
+        let show_hidden_button = gtk::ToggleButton::builder()
+            .label("Show hidden")
+            .tooltip_text("Show sensors excluded by IgnoreSensors")
+            .valign(gtk::Align::Center)
+            .build();
+        show_hidden_button.add_css_class("flat");
+        temps_group.set_header_suffix(Some(&show_hidden_button));
 
         // The multi-layout view and its four layouts.
         let view = adw::MultiLayoutView::new();
@@ -119,8 +136,11 @@ impl Dashboard {
         scrolled.set_child(Some(&view));
 
         // Breakpoints are attached to the bin, which measures the dashboard's
-        // own width rather than the window's.
+        // own width rather than the window's. The bin needs an explicit minimum
+        // size for its breakpoints to be evaluated.
         let bin = adw::BreakpointBin::new();
+        bin.set_width_request(200);
+        bin.set_height_request(200);
         bin.set_child(Some(&scrolled));
         add_breakpoint(
             &bin,
@@ -197,6 +217,25 @@ impl Dashboard {
                 .send(Command::SetHysteresis(row.is_active()));
         });
 
+        // The "Show hidden" toggle rebuilds the temperature rows immediately.
+        let show_hidden_for_button = Rc::clone(&show_hidden);
+        let temps_group_for_button = temps_group.clone();
+        let temp_rows_for_button = Rc::clone(&temp_rows);
+        let last_temps_for_button = Rc::clone(&last_temps);
+        let state_for_button = state.clone();
+        show_hidden_button.connect_toggled(move |button| {
+            show_hidden_for_button.set(button.is_active());
+            let config = state_for_button.config.borrow();
+            let sensors = last_temps_for_button.borrow();
+            rebuild_temperatures(
+                &temps_group_for_button,
+                &temp_rows_for_button,
+                config.as_ref(),
+                show_hidden_for_button.get(),
+                sensors.as_slice(),
+            );
+        });
+
         Self {
             bin,
             mode_row,
@@ -205,11 +244,12 @@ impl Dashboard {
             rpm_row,
             hysteresis_row,
             temps_group,
-            temp_rows: RefCell::new(Vec::new()),
+            temp_rows,
             chart,
             rpm_chart,
             updating,
-            last_temps: RefCell::new(Vec::new()),
+            last_temps,
+            show_hidden,
             state: state.clone(),
         }
     }
@@ -254,55 +294,83 @@ impl Dashboard {
     /// update the existing rows in place so the fast refresh does not churn
     /// widgets.
     fn update_temperatures(&self, sensors: &[SensorState]) {
-        let mut rows = self.temp_rows.borrow_mut();
-
-        // Sensors listed in `IgnoreSensors` are hidden from the dashboard.
         let config = self.state.config.borrow();
-        let sensors: Vec<&SensorState> = sensors
+        rebuild_temperatures(
+            &self.temps_group,
+            &self.temp_rows,
+            config.as_ref(),
+            self.show_hidden.get(),
+            sensors,
+        );
+    }
+}
+
+/// Rebuild the temperature rows, showing ignored sensors when `show_hidden`.
+fn rebuild_temperatures(
+    temps_group: &adw::PreferencesGroup,
+    temp_rows: &RefCell<Vec<TempRow>>,
+    config: Option<&Config>,
+    show_hidden: bool,
+    sensors: &[SensorState],
+) {
+    let mut rows = temp_rows.borrow_mut();
+
+    // Sensors listed in `IgnoreSensors` are hidden unless `show_hidden`.
+    let visible: Vec<(&SensorState, bool)> = sensors
+        .iter()
+        .map(|sensor| (sensor, sensor_is_ignored(config, sensor)))
+        .filter(|(_, ignored)| show_hidden || !*ignored)
+        .collect();
+
+    if visible.is_empty() {
+        if rows.len() == 1 && rows[0].0.is_empty() {
+            return;
+        }
+        for (_, _, row, _) in rows.drain(..) {
+            temps_group.remove(&row);
+        }
+        let title = if sensors.is_empty() {
+            "No sensors reported"
+        } else {
+            "All sensors hidden"
+        };
+        let row = adw::ActionRow::builder().title(title).build();
+        temps_group.add(&row);
+        rows.push((String::new(), false, row.upcast(), gtk::Label::new(None)));
+        return;
+    }
+
+    let same_set = rows.len() == visible.len()
+        && rows
             .iter()
-            .filter(|sensor| !sensor_is_ignored(config.as_ref(), sensor))
-            .collect();
+            .zip(&visible)
+            .all(|((name, ignored, _, _), (sensor, is_ignored))| {
+                name == &sensor.name && ignored == is_ignored
+            });
+    if same_set {
+        for ((_, _, _, label), (sensor, _)) in rows.iter().zip(&visible) {
+            label.set_text(&format!("{} °C", sensor.celsius));
+        }
+        return;
+    }
 
-        if sensors.is_empty() {
-            if rows.len() == 1 && rows[0].0.is_empty() {
-                return;
-            }
-            for (_, row, _) in rows.drain(..) {
-                self.temps_group.remove(&row);
-            }
-            let row = adw::ActionRow::builder()
-                .title("No sensors reported")
-                .build();
-            self.temps_group.add(&row);
-            rows.push((String::new(), row.upcast(), gtk::Label::new(None)));
-            return;
-        }
-
-        let same_set = rows.len() == sensors.len()
-            && rows
-                .iter()
-                .zip(&sensors)
-                .all(|((name, _, _), sensor)| name == &sensor.name);
-        if same_set {
-            for ((_, _, label), sensor) in rows.iter().zip(&sensors) {
-                label.set_text(&format!("{} °C", sensor.celsius));
-            }
-            return;
-        }
-
-        for (_, row, _) in rows.drain(..) {
-            self.temps_group.remove(&row);
-        }
-        for sensor in &sensors {
-            let row = adw::ActionRow::builder()
-                .title(&sensor.name)
-                .subtitle(format!("0x{:02X}", sensor.offset))
-                .build();
-            let label = gtk::Label::new(Some(&format!("{} °C", sensor.celsius)));
-            row.add_suffix(&label);
-            self.temps_group.add(&row);
-            rows.push((sensor.name.clone(), row.upcast(), label));
-        }
+    for (_, _, row, _) in rows.drain(..) {
+        temps_group.remove(&row);
+    }
+    for (sensor, ignored) in &visible {
+        let subtitle = if *ignored {
+            format!("0x{:02X} · ignored", sensor.offset)
+        } else {
+            format!("0x{:02X}", sensor.offset)
+        };
+        let row = adw::ActionRow::builder()
+            .title(sensor_display_name(sensor.offset))
+            .subtitle(subtitle)
+            .build();
+        let label = gtk::Label::new(Some(&format!("{} °C", sensor.celsius)));
+        row.add_suffix(&label);
+        temps_group.add(&row);
+        rows.push((sensor.name.clone(), *ignored, row.upcast(), label));
     }
 }
 

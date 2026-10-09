@@ -15,11 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dwindle tiling. Graphs sit on top with status and controls below in every
   layout, and the narrowest layout keeps all content in a single scrollable
   column.
-- **GUI shell**: the sidebar is now slim (Dashboard, Smart Curve, Sensors) and
+- **GUI shell**: navigation is now an `AdwViewSwitcher` tab strip below the
+  header bar (Dashboard, Smart Curve, Sensors) instead of a sidebar, and
   Settings moved behind a clearly iconed and labeled header menu button that
   opens an `AdwPreferencesDialog`.
-- **Dependency**: the `libadwaita` feature was bumped from `v1_5` to `v1_6` for
-  `AdwMultiLayoutView`.
+- **Dependency**: the `libadwaita` feature was bumped from `v1_5` to `v1_7` for
+  `AdwMultiLayoutView` and `AdwViewStack`/`AdwViewSwitcher`.
 
 ## [1.0.1] - 2026-10-08
 

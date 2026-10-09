@@ -188,10 +188,10 @@ single scrollable column. The app follows the system light/dark theme.
 ./target/release/omafanctrl-gui
 ```
 
-The shell is a slim `AdwNavigationSplitView` sidebar (Dashboard, Smart Curve,
-Sensors) that collapses to a single column at narrow widths. Settings live
-behind a clearly iconed and labeled header menu button that opens an
-`AdwPreferencesDialog`.
+The shell is an `AdwViewSwitcher` tab strip directly below the header bar
+(Dashboard, Smart Curve, Sensors) that collapses to icons only at narrow
+widths. Settings live behind a clearly iconed and labeled header menu button
+that opens an `AdwPreferencesDialog`.
 
 - **Dashboard** — live temperatures, RPM, the mode switch, manual level, and
   Cairo temperature- and fan-speed-history charts.

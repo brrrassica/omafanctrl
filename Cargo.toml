@@ -33,4 +33,4 @@ clap = { version = "4", features = ["derive"] }
 async-channel = "2"
 futures-util = "0.3"
 gtk4 = "0.9"
-libadwaita = { version = "0.7", features = ["v1_6"] }
+libadwaita = { version = "0.7", features = ["v1_7"] }
