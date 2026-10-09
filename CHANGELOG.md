@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.2] - 2026-10-09
 
 ### Changed
 
@@ -19,8 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   header bar (Dashboard, Smart Curve, Sensors) instead of a sidebar, and
   Settings moved behind a clearly iconed and labeled header menu button that
   opens an `AdwPreferencesDialog`.
+- **GUI sensors**: the Sensors page is flat — one row per sensor with an enable
+  switch and an editable display name — and both tabs show human-readable
+  sensor labels (for example `CPU Temperature`, or `Register 0x7D` for
+  undocumented registers).
+- **GUI dashboard**: a "Show hidden" toggle reveals sensors excluded by
+  `IgnoreSensors`.
 - **Dependency**: the `libadwaita` feature was bumped from `v1_5` to `v1_7` for
   `AdwMultiLayoutView` and `AdwViewStack`/`AdwViewSwitcher`.
+
+[1.0.2]: https://github.com/omafanctrl/omafanctrl/releases/tag/v1.0.2
 
 ## [1.0.1] - 2026-10-08
 
