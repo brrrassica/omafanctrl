@@ -79,7 +79,7 @@ jobs:
           # Binaries.
           install -Dm755 target/release/omafanctrld      "$stage/bin/omafanctrld"
           install -Dm755 target/release/omafanctrl        "$stage/bin/omafanctrl"
-          install -Dm755 target/release/omafanctrl-waybar "$stage/bin/omafanctrl-waybar"
+          install -Dm755 target/release/omafanctrl-status "$stage/bin/omafanctrl-status"
           install -Dm755 target/release/omafanctrl-gui    "$stage/bin/omafanctrl-gui"
           install -Dm755 target/release/omafanctrl-probe  "$stage/bin/omafanctrl-probe"
 

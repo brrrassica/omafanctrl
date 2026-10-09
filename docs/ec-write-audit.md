@@ -6,8 +6,8 @@ path must uphold, and the tests that pin those invariants.
 
 The audit covers [`crates/omafanctrl-core/src/ec.rs`](../crates/omafanctrl-core/src/ec.rs),
 which is the **only** module in the workspace that performs EC writes. The
-daemon, GUI, CLI, and Waybar module never touch the EC directly; they go through
-the daemon's D-Bus API.
+daemon, GUI, CLI, and bar status module never touch the EC directly; they go
+through the daemon's D-Bus API.
 
 ## The write surface
 

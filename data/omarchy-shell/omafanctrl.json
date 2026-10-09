@@ -1,0 +1,10 @@
+{
+  "id": "omafanctrl",
+  "type": "command",
+  "exec": "omafanctrl-status --show icon,mode,rpm,temp",
+  "interval": 2,
+  "tooltip": "Fan control",
+  "onClick": "omafanctrl mode cycle --notify",
+  "onRightClick": "omafanctrl toggle --notify",
+  "onMiddleClick": "omafanctrl status --notify"
+}

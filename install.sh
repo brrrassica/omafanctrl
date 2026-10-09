@@ -4,10 +4,10 @@
 #
 # One script that sets up every component of omafanctrl on a ThinkPad running
 # Omarchy Quattro (4.x): it installs the dependencies, builds (or uses the
-# prebuilt) binaries, installs the daemon, CLI, Waybar module, and GUI, wires up
-# the D-Bus policy, polkit action, systemd unit, and ec_sys drop-ins, loads the
-# EC module, enables the daemon, and configures the Hyprland and Waybar
-# integrations for the invoking user.
+# prebuilt) binaries, installs the daemon, CLI, bar status module, and GUI, wires
+# up the D-Bus policy, polkit action, systemd unit, and ec_sys drop-ins, loads
+# the EC module, enables the daemon, and configures the Hyprland and
+# omarchy-shell bar integrations for the invoking user.
 #
 # It is designed to "just work" on Omarchy 4 on a ThinkPad. On any other
 # distribution or hardware it refuses to run.
@@ -15,7 +15,7 @@
 # Usage:
 #   ./install.sh                 # install (re-execs itself with sudo)
 #   sudo ./install.sh            # same, already root
-#   ./install.sh --no-user-setup  # skip the per-user Hyprland/Waybar wiring
+#   ./install.sh --no-user-setup  # skip the per-user Hyprland/bar wiring
 #   ./install.sh --skip-preflight # bypass the Omarchy/ThinkPad checks (testing)
 #   ./install.sh --help
 #
@@ -31,14 +31,12 @@ set -euo pipefail
 readonly SCRIPT_NAME="omafanctrl"
 readonly DAEMON_BIN="omafanctrld"
 readonly CLI_BIN="omafanctrl"
-readonly WAYBAR_BIN="omafanctrl-waybar"
+readonly STATUS_BIN="omafanctrl-status"
 readonly GUI_BIN="omafanctrl-gui"
 readonly PROBE_BIN="omafanctrl-probe"
 
 readonly CONFIG_DIR="/etc/omafanctrl"
 readonly CONFIG_FILE="$CONFIG_DIR/TPFanControl.ini"
-
-readonly MARKER_WAYBAR="/* >>> omafanctrl (managed by install.sh) >>> */"
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -235,7 +233,7 @@ if [[ "$PREBUILT" -eq 0 ]]; then
   BIN_DIR="$SCRIPT_DIR/target/release"
 fi
 
-for bin in "$DAEMON_BIN" "$CLI_BIN" "$WAYBAR_BIN" "$GUI_BIN"; do
+for bin in "$DAEMON_BIN" "$CLI_BIN" "$STATUS_BIN" "$GUI_BIN"; do
   [[ -x "$BIN_DIR/$bin" ]] || die "missing binary: $BIN_DIR/$bin"
 done
 
@@ -246,7 +244,7 @@ done
 info "Installing binaries to /usr/bin"
 install -Dm755 "$BIN_DIR/$DAEMON_BIN" "/usr/bin/$DAEMON_BIN"
 install -Dm755 "$BIN_DIR/$CLI_BIN"    "/usr/bin/$CLI_BIN"
-install -Dm755 "$BIN_DIR/$WAYBAR_BIN" "/usr/bin/$WAYBAR_BIN"
+install -Dm755 "$BIN_DIR/$STATUS_BIN" "/usr/bin/$STATUS_BIN"
 install -Dm755 "$BIN_DIR/$GUI_BIN"    "/usr/bin/$GUI_BIN"
 if [[ -x "$BIN_DIR/$PROBE_BIN" ]]; then
   install -Dm755 "$BIN_DIR/$PROBE_BIN" "/usr/bin/$PROBE_BIN"
@@ -312,17 +310,17 @@ systemctl enable --now omafanctrld \
   || warn "omafanctrld failed to start; check: journalctl -u omafanctrld -e"
 
 # ---------------------------------------------------------------------------
-# Per-user desktop integration (Hyprland + Waybar)
+# Per-user desktop integration (Hyprland + omarchy-shell bar)
 # ---------------------------------------------------------------------------
 
 setup_user_integration() {
   if [[ -z "$TARGET_HOME" || ! -d "$TARGET_HOME" ]]; then
-    warn "could not determine the desktop user's home; skipping Hyprland/Waybar setup"
+    warn "could not determine the desktop user's home; skipping Hyprland/bar setup"
     return 0
   fi
 
   local hypr_dir="$TARGET_HOME/.config/hypr"
-  local waybar_dir="$TARGET_HOME/.config/waybar"
+  local omarchy_dir="$TARGET_HOME/.config/omarchy"
 
   # --- Hyprland bindings -------------------------------------------------
   if [[ -d "$hypr_dir" ]]; then
@@ -345,96 +343,43 @@ setup_user_integration() {
     warn "no ~/.config/hypr directory; skipping Hyprland bindings"
   fi
 
-  # --- Waybar CSS --------------------------------------------------------
-  if [[ -d "$waybar_dir" ]]; then
-    local css="$waybar_dir/style.css"
-    if [[ -f "$css" ]] && grep -q 'custom-omafanctrl' "$css"; then
-      ok "Waybar styling already present"
+  # --- omarchy-shell bar module ------------------------------------------
+  # Omarchy Quattro (4.x) uses omarchy-shell (Quickshell), not Waybar. The
+  # module is a `type: "command"` entry in ~/.config/omarchy/shell.json; the
+  # helper seeds the file from the Omarchy defaults and merges idempotently.
+  local shell_json="$omarchy_dir/shell.json"
+  local omarchy_defaults="${OMARCHY_PATH:-/usr/share/omarchy}/config/omarchy/shell.json"
+  if [[ -f "$DATA_DIR/omarchy-shell/install-module.sh" ]]; then
+    info "Adding the omafanctrl module to $shell_json"
+    if bash "$DATA_DIR/omarchy-shell/install-module.sh" \
+      --config "$shell_json" --defaults "$omarchy_defaults"; then
+      chown "$TARGET_USER:$TARGET_USER" "$shell_json" 2>/dev/null || true
+      ok "omarchy-shell bar module configured"
+      reload_omarchy_shell
     else
-      info "Adding Waybar styling to $css"
-      {
-        printf '\n%s\n' "$MARKER_WAYBAR"
-        cat "$DATA_DIR/waybar/omafanctrl.css"
-      } >> "$css"
-      chown "$TARGET_USER:$TARGET_USER" "$css" 2>/dev/null || true
-      ok "Waybar styling appended"
-    fi
-
-    # --- Waybar module ---------------------------------------------------
-    local wconf=""
-    for candidate in "$waybar_dir/config.jsonc" "$waybar_dir/config"; do
-      [[ -f "$candidate" ]] && { wconf="$candidate"; break; }
-    done
-    if [[ -z "$wconf" ]]; then
-      warn "no Waybar config found; add the module from data/waybar/omafanctrl.jsonc manually"
-    elif grep -q 'custom/omafanctrl' "$wconf"; then
-      ok "Waybar module already configured"
-    elif command -v python3 >/dev/null 2>&1; then
-      info "Merging the Waybar module into $wconf"
-      cp -a "$wconf" "$wconf.omafanctrl.bak"
-      if python3 - "$wconf" <<'PY'
-import re, sys
-
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as fh:
-    text = fh.read()
-
-if "custom/omafanctrl" in text:
-    sys.exit(0)
-
-module = '''  "custom/omafanctrl": {
-    "exec": "omafanctrl-waybar --show icon,mode,rpm,temp --icon \\"\\"",
-    "return-type": "json",
-    "interval": 2,
-    "format": "{}",
-    "tooltip": true,
-    "on-click": "omafanctrl mode cycle --notify",
-    "on-click-right": "omafanctrl toggle --notify",
-    "on-scroll-up": "omafanctrl level up --notify",
-    "on-scroll-down": "omafanctrl level down --notify"
-  }'''
-
-# Add the module to modules-right (create the key if it is missing).
-m = re.search(r'("modules-right"\s*:\s*\[)', text)
-if m:
-    after = text[m.end():]
-    if re.match(r'\s*\]', after):
-        text = text[:m.end()] + '\n    "custom/omafanctrl"\n  ' + after
-    else:
-        text = text[:m.end()] + '\n    "custom/omafanctrl",' + after
-else:
-    # Insert a modules-right array right after the opening brace.
-    brace = text.find("{")
-    if brace == -1:
-        sys.exit(1)
-    text = text[:brace + 1] + '\n  "modules-right": ["custom/omafanctrl"],' + text[brace + 1:]
-
-# Insert the module definition before the final closing brace, making sure the
-# preceding property is comma-terminated.
-close = text.rfind("}")
-if close == -1:
-    sys.exit(1)
-head = text[:close]
-tail = text[close:]
-stripped = head.rstrip()
-if stripped and stripped[-1] not in "{,":
-    head = stripped + ",\n"
-text = head + module + "\n" + tail
-
-with open(path, "w", encoding="utf-8") as fh:
-    fh.write(text)
-PY
-      then
-        chown "$TARGET_USER:$TARGET_USER" "$wconf" 2>/dev/null || true
-        ok "Waybar module merged (backup at $wconf.omafanctrl.bak)"
-      else
-        warn "could not merge the Waybar config automatically; see data/waybar/omafanctrl.jsonc"
-      fi
-    else
-      warn "python3 not found; add the module from data/waybar/omafanctrl.jsonc manually"
+      warn "could not configure the omarchy-shell bar module; see data/omarchy-shell/README.md"
     fi
   else
-    warn "no ~/.config/waybar directory; skipping Waybar setup"
+    warn "data/omarchy-shell/install-module.sh not found; add the module manually"
+  fi
+}
+
+# Best-effort: ask the running shell to reload shell.json. The shell also
+# hot-reloads on save, so a failure here is not fatal.
+reload_omarchy_shell() {
+  command -v omarchy-shell >/dev/null 2>&1 || return 0
+  local uid runtime
+  uid="$(id -u "$TARGET_USER" 2>/dev/null || true)"
+  [[ -n "$uid" ]] || return 0
+  runtime="/run/user/$uid"
+  if sudo -u "$TARGET_USER" env \
+    XDG_RUNTIME_DIR="$runtime" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
+    OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}" \
+    omarchy-shell shell reloadConfig >/dev/null 2>&1; then
+    ok "omarchy-shell reloaded"
+  else
+    warn "could not reload omarchy-shell; run 'omarchy restart shell' to show the module"
   fi
 }
 
@@ -469,8 +414,9 @@ ${C_GREEN}${C_BOLD}omafanctrl is installed.${C_RESET}
   Daemon   : systemctl status omafanctrld
   CLI      : omafanctrl status
   GUI      : omafanctrl-gui
-  Waybar   : omafanctrl-waybar --show icon,mode,rpm,temp
+  Bar      : omafanctrl-status --show icon,mode,rpm,temp
   Config   : $CONFIG_FILE
 
 Reload Hyprland to pick up the new keybindings (SUPER + F1..F3).
+If the bar module does not appear, run: omarchy restart shell
 EOF

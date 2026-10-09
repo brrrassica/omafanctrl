@@ -1,6 +1,6 @@
-//! Library for the `omafanctrl` CLI and Waybar module.
+//! Library for the `omafanctrl` CLI and bar status module.
 //!
 //! The D-Bus client is shared by the `omafanctrl` binary and the
-//! `omafanctrl-waybar` module.
+//! `omafanctrl-status` module.
 
 pub mod client;

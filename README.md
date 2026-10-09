@@ -4,7 +4,8 @@ A modern fan-control suite for the **ThinkPad E14 Gen 4** on **Omarchy Quattro
 (4.x)**. It is a Linux counterpart to
 [TPFanCtrl2](https://github.com/Shuzhengz/TPFanCtrl2): direct Embedded
 Controller (EC) access, BIOS/Manual/Smart modes, and `.ini` configuration, with
-a native GTK4 + libadwaita app, a scriptable CLI, and a Waybar module.
+a native GTK4 + libadwaita app, a scriptable CLI, and an omarchy-shell bar
+module.
 
 ## Install
 
@@ -34,7 +35,7 @@ change history is in [CHANGELOG.md](CHANGELOG.md).
 | `omafanctrld` | Privileged daemon (systemd service) that owns the EC and exposes a D-Bus API |
 | `omafanctrl-gui` | GTK4 + libadwaita desktop app (adaptive, Wayland-native) |
 | `omafanctrl` | CLI client for scripting and Hyprland hotkeys |
-| `omafanctrl-waybar` | Waybar module that renders fan state in the bar |
+| `omafanctrl-status` | Bar status module for omarchy-shell (Omarchy Quattro) |
 
 ## Requirements
 
@@ -104,24 +105,35 @@ o.bind("SUPER + SHIFT + F2", "Fan: level down", "omafanctrl level down --notify"
 o.bind("SUPER + F3", "Fan: status", "omafanctrl status --notify")
 ```
 
-### Waybar
+### Bar module (omarchy-shell)
 
-Add the module from
-[`data/waybar/omafanctrl.jsonc`](data/waybar/omafanctrl.jsonc) to your Waybar
-config and append the colours from
-[`data/waybar/omafanctrl.css`](data/waybar/omafanctrl.css) to
-`~/.config/waybar/style.css`:
+Omarchy Quattro (4.x) uses `omarchy-shell` (Quickshell), not Waybar. Add the
+module to `~/.config/omarchy/shell.json` under `bar.layout.<left|center|right>`,
+or run the helper, which seeds the file from the Omarchy defaults and merges
+idempotently:
 
-```jsonc
-"custom/omafanctrl": {
-  "exec": "omafanctrl-waybar --show icon,mode,rpm,temp",
-  "return-type": "json",
+```sh
+data/omarchy-shell/install-module.sh
+```
+
+```json
+{
+  "id": "omafanctrl",
+  "type": "command",
+  "exec": "omafanctrl-status --show icon,mode,rpm,temp",
   "interval": 2,
-  "on-click": "omafanctrl mode cycle --notify",
-  "on-scroll-up": "omafanctrl level up --notify",
-  "on-scroll-down": "omafanctrl level down --notify"
+  "tooltip": "Fan control",
+  "onClick": "omafanctrl mode cycle --notify",
+  "onRightClick": "omafanctrl toggle --notify",
+  "onMiddleClick": "omafanctrl status --notify"
 }
 ```
+
+The shell hot-reloads `shell.json` on save; run `omarchy restart shell` if the
+module does not appear. Custom command modules support left/right/middle click
+only — there are no scroll handlers, so `level up`/`level down` stay on the CLI
+and Hyprland hotkeys. See
+[`data/omarchy-shell/README.md`](data/omarchy-shell/README.md) for details.
 
 ## Manual install
 

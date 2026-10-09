@@ -6,7 +6,7 @@ omafanctrl has four components:
 | --- | --- |
 | `omafanctrld` | Privileged daemon (systemd system service) that owns the EC |
 | `omafanctrl` | CLI client |
-| `omafanctrl-waybar` | Waybar module |
+| `omafanctrl-status` | Bar status module for omarchy-shell |
 | `omafanctrl-gui` | GTK4 + libadwaita desktop app |
 
 The daemon is the only component that writes to the Embedded Controller, so it
@@ -41,15 +41,15 @@ The installer:
 - installs the runtime dependencies (`gtk4`, `libadwaita`, `dbus`, `polkit`) and,
   when no prebuilt binaries are present, the build dependencies
   (`base-devel`, `rust`, `pkgconf`, `git`);
-- installs the daemon, CLI, Waybar module, GUI, and probe binaries;
+- installs the daemon, CLI, bar status module, GUI, and probe binaries;
 - installs the D-Bus policy, polkit action, systemd unit, `ec_sys` drop-ins,
   desktop entry, icon, and the default `/etc/omafanctrl/TPFanControl.ini`;
 - loads `ec_sys` with `write_support=1` and enables `omafanctrld`;
-- appends the Hyprland keybindings and the Waybar module/styling for the
+- appends the Hyprland keybindings and adds the omarchy-shell bar module for the
   invoking user.
 
 It is idempotent, so re-running it upgrades an existing install in place. Pass
-`--no-user-setup` to skip the per-user Hyprland/Waybar wiring.
+`--no-user-setup` to skip the per-user Hyprland/bar wiring.
 
 ## From a release tarball (source)
 
@@ -94,7 +94,7 @@ cargo build --release
 
 sudo install -Dm755 target/release/omafanctrld /usr/bin/omafanctrld
 sudo install -Dm755 target/release/omafanctrl /usr/bin/omafanctrl
-sudo install -Dm755 target/release/omafanctrl-waybar /usr/bin/omafanctrl-waybar
+sudo install -Dm755 target/release/omafanctrl-status /usr/bin/omafanctrl-status
 sudo install -Dm755 target/release/omafanctrl-gui /usr/bin/omafanctrl-gui
 
 sudo install -Dm644 data/dbus/org.omarchy.omafanctrl.conf \
@@ -118,9 +118,16 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now omafanctrld
 ```
 
+Then add the bar module for your user (Omarchy Quattro uses `omarchy-shell`, not
+Waybar):
+
+```sh
+data/omarchy-shell/install-module.sh
+```
+
 ## AppImage
 
-The AppImage bundles the **clients only** (GUI, CLI, and Waybar module):
+The AppImage bundles the **clients only** (GUI, CLI, and bar status module):
 
 ```sh
 packaging/appimage/build.sh

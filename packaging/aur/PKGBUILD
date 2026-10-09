@@ -2,9 +2,9 @@
 #
 # AUR package for omafanctrl (git version).
 #
-# Builds the whole Cargo workspace and installs the daemon, CLI, Waybar module,
-# and GUI, together with the D-Bus policy, polkit action, systemd unit, and the
-# ec_sys module drop-ins.
+# Builds the whole Cargo workspace and installs the daemon, CLI, bar status
+# module, and GUI, together with the D-Bus policy, polkit action, systemd unit,
+# and the ec_sys module drop-ins.
 
 pkgname=omafanctrl-git
 pkgver=r0.0.0
@@ -37,7 +37,7 @@ package() {
   # Binaries.
   install -Dm755 target/release/omafanctrld "$pkgdir/usr/bin/omafanctrld"
   install -Dm755 target/release/omafanctrl "$pkgdir/usr/bin/omafanctrl"
-  install -Dm755 target/release/omafanctrl-waybar "$pkgdir/usr/bin/omafanctrl-waybar"
+  install -Dm755 target/release/omafanctrl-status "$pkgdir/usr/bin/omafanctrl-status"
   install -Dm755 target/release/omafanctrl-gui "$pkgdir/usr/bin/omafanctrl-gui"
 
   # System integration.
@@ -61,6 +61,14 @@ package() {
   # Default configuration (marked as a backup file above).
   install -Dm644 data/profiles/e14-gen4.ini \
     "$pkgdir/etc/omafanctrl/TPFanControl.ini"
+
+  # omarchy-shell bar module helper (run as the desktop user).
+  install -Dm755 data/omarchy-shell/install-module.sh \
+    "$pkgdir/usr/share/omafanctrl/omarchy-shell/install-module.sh"
+  install -Dm644 data/omarchy-shell/omafanctrl.json \
+    "$pkgdir/usr/share/omafanctrl/omarchy-shell/omafanctrl.json"
+  install -Dm644 data/omarchy-shell/README.md \
+    "$pkgdir/usr/share/omafanctrl/omarchy-shell/README.md"
 
   # Documentation.
   install -Dm644 README.md "$pkgdir/usr/share/doc/omafanctrl/README.md"

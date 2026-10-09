@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-10-09
+
+### Changed
+
+- **Bar integration migrated to omarchy-shell.** Omarchy Quattro (4.x) replaced
+  Waybar with `omarchy-shell` (Quickshell), so the Waybar module never appeared.
+  The status module is now a `type: "command"` entry in
+  `~/.config/omarchy/shell.json` under `bar.layout.<section>`, and the installer
+  merges it idempotently (seeding the file from the Omarchy defaults). The
+  `data/waybar/` config and CSS were removed.
+- **Binary renamed** `omafanctrl-waybar` → `omafanctrl-status`. It still emits
+  the "Waybar-style JSON" contract (`text`, `tooltip`, `class`, `alt`) that the
+  omarchy-shell command module parses, plus `--plain` for debugging.
+- **Interactions:** left click cycles the mode, right click toggles, middle click
+  shows a status notification. Custom command modules have no scroll handlers, so
+  `level up`/`level down` remain CLI and Hyprland-hotkey actions.
+- **Packaging:** the AUR packages and the AppImage now install
+  `omafanctrl-status` and ship the `data/omarchy-shell/` helper.
+
+[1.1.0]: https://github.com/omafanctrl/omafanctrl/releases/tag/v1.1.0
+
 ## [1.0.2] - 2026-10-09
 
 ### Changed

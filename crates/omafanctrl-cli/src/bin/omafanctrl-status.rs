@@ -1,15 +1,22 @@
-//! Waybar `custom` module for `omafanctrl`.
+//! Status module for the Omarchy Quattro bar (`omarchy-shell`).
 //!
-//! Queries the daemon and prints a Waybar JSON object (`text`, `tooltip`,
-//! `class`, `alt`) or plain text. The `class` is the current mode so the bar can
-//! be styled per mode; a daemon that cannot be reached reports `class: "error"`.
+//! Queries the daemon and prints a JSON object (`text`, `tooltip`, `class`,
+//! `alt`) or plain text. The output is the "Waybar-style JSON" contract that
+//! `omarchy-shell`'s custom command module parses, so it can be dropped into
+//! `~/.config/omarchy/shell.json` as a `type: "command"` bar module. The
+//! `class` is the current mode; a daemon that cannot be reached reports
+//! `class: "error"`.
 //!
 //! ```jsonc
-//! "custom/omafanctrl": {
-//!   "exec": "omafanctrl-waybar --show icon,mode,rpm,temp",
-//!   "return-type": "json",
+//! {
+//!   "id": "omafanctrl",
+//!   "type": "command",
+//!   "exec": "omafanctrl-status --show icon,mode,rpm,temp",
 //!   "interval": 2,
-//!   "on-click": "omafanctrl mode cycle --notify"
+//!   "tooltip": "Fan control",
+//!   "onClick": "omafanctrl mode cycle --notify",
+//!   "onRightClick": "omafanctrl toggle --notify",
+//!   "onMiddleClick": "omafanctrl status --notify"
 //! }
 //! ```
 
@@ -19,12 +26,12 @@ use clap::Parser;
 use omafanctrl_cli::client::Client;
 use omafanctrl_core::dbus::State;
 
-/// Command-line arguments for the Waybar module.
+/// Command-line arguments for the bar status module.
 #[derive(Debug, Parser)]
 #[command(
-    name = "omafanctrl-waybar",
+    name = "omafanctrl-status",
     version,
-    about = "Waybar custom module for omafanctrl"
+    about = "Status module for the Omarchy Quattro bar"
 )]
 struct Args {
     /// Fields to show, comma-separated: `icon`, `mode`, `rpm`, `temp`.
@@ -35,7 +42,7 @@ struct Args {
     #[arg(long, default_value = "")]
     icon: String,
 
-    /// Output plain text instead of Waybar JSON.
+    /// Output plain text instead of the JSON module contract.
     #[arg(long)]
     plain: bool,
 

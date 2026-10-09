@@ -3,7 +3,7 @@
 # Build an AppImage bundling the omafanctrl GUI and CLI clients.
 #
 # The AppImage contains the *clients* only (omafanctrl-gui, omafanctrl, and
-# omafanctrl-waybar). The privileged daemon (omafanctrld) must be installed as a
+# omafanctrl-status). The privileged daemon (omafanctrld) must be installed as a
 # system service separately — see docs/install.md. The clients talk to it over
 # the D-Bus system bus.
 #
@@ -35,7 +35,7 @@ mkdir -p \
 
 install -Dm755 target/release/omafanctrl-gui "$appdir/usr/bin/omafanctrl-gui"
 install -Dm755 target/release/omafanctrl "$appdir/usr/bin/omafanctrl"
-install -Dm755 target/release/omafanctrl-waybar "$appdir/usr/bin/omafanctrl-waybar"
+install -Dm755 target/release/omafanctrl-status "$appdir/usr/bin/omafanctrl-status"
 install -Dm644 data/desktop/org.omarchy.omafanctrl.desktop \
   "$appdir/usr/share/applications/org.omarchy.omafanctrl.desktop"
 install -Dm644 data/icons/org.omarchy.omafanctrl.svg \

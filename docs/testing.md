@@ -95,7 +95,9 @@ Each step has an expected result; a failure is a release blocker.
       `eighth` layouts as the window is resized, keeping the graphs on top and
       the status and controls below them.
 - [ ] The header Settings menu button opens the preferences dialog.
-- [ ] `omafanctrl-waybar --show icon,mode,rpm,temp` prints valid Waybar JSON.
+- [ ] `omafanctrl-status --show icon,mode,rpm,temp` prints valid module JSON.
+- [ ] The `omafanctrl` module appears in the omarchy-shell bar and cycles the
+      mode on left click.
 - [ ] The Hyprland hotkeys in `data/hyprland/bindings.lua` switch modes.
 
 ### 6. Safety
