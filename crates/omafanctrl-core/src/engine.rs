@@ -112,6 +112,22 @@ pub fn default_sensor_name(offset: u8) -> Option<&'static str> {
     }
 }
 
+/// A human-readable display label for a temperature sensor offset.
+///
+/// Known offsets get a descriptive label; offsets whose only name is a hex
+/// code (for example `x7a`) fall back to `Register 0xNN`.
+pub fn sensor_display_name(offset: u8) -> String {
+    match offset {
+        0x78 => "CPU Temperature".to_string(),
+        0x79 => "GPU Temperature".to_string(),
+        0xC0 => "Power Temperature".to_string(),
+        0xC1 => "Ambient Temperature".to_string(),
+        0xC2 => "System Bus Temperature".to_string(),
+        0xC3 => "PCIe Temperature".to_string(),
+        _ => format!("Register 0x{offset:02X}"),
+    }
+}
+
 /// Read a set of sensor offsets into named [`SensorReading`]s.
 ///
 /// Unknown offsets are labelled `x<hex>` (for example `x7a`), matching the
@@ -999,6 +1015,16 @@ Level=60 3 0 0
         let readings = read_sensor_readings(&mut ec, &[0x78, 0x7A]).unwrap();
         assert_eq!(readings[0], SensorReading::new(0x78, "cpu", 45));
         assert_eq!(readings[1], SensorReading::new(0x7A, "x7a", 50));
+    }
+
+    #[test]
+    fn sensor_display_names_known_and_unknown_offsets() {
+        assert_eq!(sensor_display_name(0x78), "CPU Temperature");
+        assert_eq!(sensor_display_name(0x79), "GPU Temperature");
+        assert_eq!(sensor_display_name(0xC0), "Power Temperature");
+        // Offsets whose only name is a hex code fall back to the register label.
+        assert_eq!(sensor_display_name(0x7D), "Register 0x7D");
+        assert_eq!(sensor_display_name(0x7A), "Register 0x7A");
     }
 
     // --- Watchdog verification (M9) --------------------------------------

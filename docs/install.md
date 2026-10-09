@@ -17,7 +17,7 @@ must run as root. The clients talk to it over the D-Bus **system bus**.
 - Arch Linux / Omarchy Quattro (4.x)
 - A ThinkPad (the shipped profile targets the E14 Gen 4)
 - The `ec_sys` kernel module with write support
-- GTK4 and libadwaita (for the GUI)
+- GTK4 and libadwaita 1.7+ (for the GUI)
 
 ## One-shot install (recommended)
 

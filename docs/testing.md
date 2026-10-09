@@ -89,6 +89,12 @@ Each step has an expected result; a failure is a release blocker.
 
 - [ ] `omafanctrl-gui` shows live temperatures, RPM, and the mode switch, and
       updates when the mode changes from the CLI.
+- [ ] The tab strip below the header switches between Dashboard, Smart Curve,
+      and Sensors, and collapses to icons only at narrow widths.
+- [ ] The GUI dashboard reflows through the `desktop`, `half`, `quarter`, and
+      `eighth` layouts as the window is resized, keeping the graphs on top and
+      the status and controls below them.
+- [ ] The header Settings menu button opens the preferences dialog.
 - [ ] `omafanctrl-waybar --show icon,mode,rpm,temp` prints valid Waybar JSON.
 - [ ] The Hyprland hotkeys in `data/hyprland/bindings.lua` switch modes.
 

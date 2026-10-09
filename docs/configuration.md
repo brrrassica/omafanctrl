@@ -74,8 +74,8 @@ verified E14 Gen 4 profile.
 ## Editing
 
 - CLI: `omafanctrl config get`, `omafanctrl config set new.ini`
-- GUI: the Smart Curve, Sensors, and Settings pages write the config back
-  through the daemon.
+- GUI: the Smart Curve and Sensors pages and the Settings dialog write the
+  config back through the daemon.
 
 `SetConfig` validates the document before writing, so an invalid configuration
 never reaches disk.
