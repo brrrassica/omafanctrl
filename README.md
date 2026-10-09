@@ -177,18 +177,24 @@ shown by `omarchy menu keybindings --print`.
 
 ## GUI
 
-`omafanctrl-gui` is a GTK4 + libadwaita desktop app. It uses an adaptive
-`AdwNavigationSplitView` shell (sidebar + content) that collapses to a single
-column at narrow tiling widths, and follows the system light/dark theme.
+`omafanctrl-gui` is a GTK4 + libadwaita desktop app. Its primary view is an
+adaptive `AdwMultiLayoutView` dashboard that reflows for Hyprland's dwindle
+tiling: four layouts (`desktop`, `half`, `quarter`, `eighth`) are selected by
+`AdwBreakpoint` width conditions. In every layout the graphs sit on top, with
+status and controls below them, and the narrowest layout keeps all content in a
+single scrollable column. The app follows the system light/dark theme.
 
 ```sh
 ./target/release/omafanctrl-gui
 ```
 
-Pages:
+The shell is a slim `AdwNavigationSplitView` sidebar (Dashboard, Smart Curve,
+Sensors) that collapses to a single column at narrow widths. Settings live
+behind a clearly iconed and labeled header menu button that opens an
+`AdwPreferencesDialog`.
 
-- **Overview** — live temperatures, RPM, the mode switch, manual level, and a
-  Cairo temperature-history chart.
+- **Dashboard** — live temperatures, RPM, the mode switch, manual level, and
+  Cairo temperature- and fan-speed-history charts.
 - **Smart Curve** — a draggable curve editor plus precise threshold spin rows.
 - **Sensors** — enable/disable (ignore), rename, and inspect each sensor.
 - **Settings** — cycle interval, start behaviour, config path, and reload.
@@ -260,6 +266,30 @@ and append the per-mode colours from
 `omafanctrl` writes directly to the Embedded Controller. A watchdog always
 reverts the fan to BIOS auto control when the daemon stops or crashes. See
 [docs/safety.md](docs/safety.md) for the full list of protections.
+
+## Help wanted
+
+`omafanctrl` is developed and tested on a single machine: a **ThinkPad E14 Gen 4**
+running **Omarchy Quattro (4.x)**. The EC register map, the fan curve, and the
+safety limits are all verified against that one device, so behaviour on other
+ThinkPads is currently unproven.
+
+If you have a different ThinkPad running Omarchy Quattro, your help would be
+invaluable:
+
+- **Probe your EC** with the read-only tool and share the output:
+
+  ```sh
+  sudo cargo run -p omafanctrl-core --bin omafanctrl-probe
+  ```
+
+- **Report your model** (and the probe output) in an issue so the register map
+  and fan curve can be extended to your hardware.
+- **Test the GUI** at each Hyprland dwindle size (full, half, quarter, 1/8) and
+  report any layout or rendering problems.
+
+Please do not run the write path (`--force`, the daemon, or manual fan levels)
+on untested hardware until the register map has been confirmed for your model.
 
 ## License
 

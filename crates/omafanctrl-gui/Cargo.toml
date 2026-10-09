@@ -14,7 +14,7 @@ path = "src/main.rs"
 omafanctrl-core.workspace = true
 # Renamed to the conventional `gtk`/`adw` paths used by gtk4-rs.
 gtk = { package = "gtk4", version = "0.9" }
-adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_6"] }
 zbus.workspace = true
 tokio.workspace = true
 async-channel.workspace = true

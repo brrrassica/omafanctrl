@@ -1,26 +1,36 @@
 //! `omafanctrl-gui` — the GTK4 + libadwaita desktop application.
 //!
 //! An adaptive, Wayland-native front end for the `omafanctrl` daemon. The shell
-//! is an [`adw::NavigationSplitView`] (sidebar + content) that collapses to a
-//! single column at narrow tiling widths. Live data arrives from the daemon's
-//! `StateChanged`/`ConfigChanged` signals via a background D-Bus client.
+//! is an [`adw::NavigationSplitView`] (slim sidebar + content) whose primary
+//! page is an [`adw::MultiLayoutView`] dashboard that reflows for Hyprland's
+//! dwindle tiling sizes. Settings live behind a header menu button. Live data
+//! arrives from the daemon's `StateChanged`/`ConfigChanged` signals via a
+//! background D-Bus client.
 
 mod chart;
 mod client;
 mod curve;
+mod curve_page;
+mod dashboard;
+mod sensors_page;
+mod settings;
+mod state;
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
+use gtk::gio;
 use gtk::glib;
-use omafanctrl_core::config::{Config, SmartMode};
-use omafanctrl_core::dbus::{SensorState, State};
+use omafanctrl_core::config::Config;
 
-use crate::chart::HistoryChart;
-use crate::client::{ClientHandle, Command, Update};
-use crate::curve::CurveEditor;
+use crate::client::{Command, Update};
+use crate::curve_page::CurvePage;
+use crate::dashboard::Dashboard;
+use crate::sensors_page::SensorsPage;
+use crate::settings::SettingsPage;
+use crate::state::AppState;
 
 /// The application ID, matching the D-Bus name.
 const APP_ID: &str = "org.omarchy.omafanctrl";
@@ -29,45 +39,6 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run()
-}
-
-/// Map a mode name to its combo-row index.
-fn mode_index(mode: &str) -> u32 {
-    match mode {
-        "manual" => 1,
-        "smart" => 2,
-        _ => 0,
-    }
-}
-
-/// Map a combo-row index to a mode name.
-fn mode_name(index: u32) -> &'static str {
-    match index {
-        1 => "manual",
-        2 => "smart",
-        _ => "bios",
-    }
-}
-
-/// Shared application state.
-#[derive(Clone)]
-struct AppState {
-    handle: ClientHandle,
-    config: Rc<RefCell<Option<Config>>>,
-    toast_overlay: adw::ToastOverlay,
-}
-
-impl AppState {
-    /// Show a toast.
-    fn toast(&self, message: &str) {
-        self.toast_overlay.add_toast(adw::Toast::new(message));
-    }
-
-    /// Persist a configuration through the daemon.
-    fn set_config(&self, config: &Config) {
-        *self.config.borrow_mut() = Some(config.clone());
-        self.handle.send(Command::SetConfig(config.to_ini()));
-    }
 }
 
 /// Build the application window.
@@ -90,15 +61,14 @@ fn build_ui(app: &adw::Application) {
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
 
-    let overview = Rc::new(OverviewPage::new(&state));
+    let dashboard = Rc::new(Dashboard::new(&state));
     let curve_page = Rc::new(CurvePage::new(&state));
     let sensors_page = Rc::new(SensorsPage::new(&state));
     let settings_page = Rc::new(SettingsPage::new(&state));
 
-    stack.add_named(overview.widget(), Some("overview"));
+    stack.add_named(dashboard.widget(), Some("dashboard"));
     stack.add_named(curve_page.widget(), Some("curve"));
     stack.add_named(sensors_page.widget(), Some("sensors"));
-    stack.add_named(settings_page.widget(), Some("settings"));
 
     let status = adw::StatusPage::builder()
         .icon_name("dialog-warning-symbolic")
@@ -109,15 +79,18 @@ fn build_ui(app: &adw::Application) {
         .build();
     stack.add_named(&status, Some("error"));
 
-    // Sidebar.
+    // Slim sidebar: the dashboard plus the two secondary pages.
     let sidebar = gtk::ListBox::new();
     sidebar.set_selection_mode(gtk::SelectionMode::Single);
     sidebar.add_css_class("navigation-sidebar");
     let entries = [
-        ("overview", "Overview", "utilities-system-monitor-symbolic"),
+        (
+            "dashboard",
+            "Dashboard",
+            "utilities-system-monitor-symbolic",
+        ),
         ("curve", "Smart Curve", "office-chart-line-symbolic"),
         ("sensors", "Sensors", "sensors-applet-symbolic"),
-        ("settings", "Settings", "preferences-system-symbolic"),
     ];
     for (_, title, icon) in entries {
         let row = adw::ActionRow::builder().title(title).build();
@@ -125,19 +98,64 @@ fn build_ui(app: &adw::Application) {
         sidebar.append(&row);
     }
 
-    let content_page = adw::NavigationPage::new(&stack, "Overview");
+    let content_page = adw::NavigationPage::new(&stack, "Dashboard");
     let sidebar_page = adw::NavigationPage::new(&sidebar, "omafanctrl");
 
     let split = adw::NavigationSplitView::new();
     split.set_sidebar(Some(&sidebar_page));
     split.set_content(Some(&content_page));
 
+    // Header bar with a clearly iconed and labeled Settings menu button.
+    let header = adw::HeaderBar::new();
+    let menu = gio::Menu::new();
+    menu.append(Some("Preferences…"), Some("win.preferences"));
+    menu.append(Some("Reload configuration"), Some("win.reload-config"));
+    menu.append(Some("About omafanctrl"), Some("win.about"));
+    let settings_button = gtk::MenuButton::builder()
+        .icon_name("preferences-system-symbolic")
+        .label("Settings")
+        .menu_model(&menu)
+        .build();
+    header.pack_end(&settings_button);
+
     let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&split));
 
     toast_overlay.set_child(Some(&toolbar));
     window.set_content(Some(&toast_overlay));
+
+    // Settings actions.
+    let preferences_action = gio::SimpleAction::new("preferences", None);
+    let settings_dialog = settings_page.dialog().clone();
+    let window_for_prefs = window.clone();
+    preferences_action.connect_activate(move |_, _| {
+        settings_dialog.present(Some(&window_for_prefs));
+    });
+    window.add_action(&preferences_action);
+
+    let reload_action = gio::SimpleAction::new("reload-config", None);
+    let state_for_reload = state.clone();
+    reload_action.connect_activate(move |_, _| {
+        state_for_reload.handle.send(Command::ReloadConfig);
+        state_for_reload.toast("Reloading configuration…");
+    });
+    window.add_action(&reload_action);
+
+    let about_action = gio::SimpleAction::new("about", None);
+    let window_for_about = window.clone();
+    about_action.connect_activate(move |_, _| {
+        let about = adw::AboutDialog::builder()
+            .application_name("omafanctrl")
+            .application_icon(APP_ID)
+            .developer_name("omafanctrl contributors")
+            .version(env!("CARGO_PKG_VERSION"))
+            .website("https://github.com/omafanctrl/omafanctrl")
+            .license_type(gtk::License::MitX11)
+            .build();
+        about.present(Some(&window_for_about));
+    });
+    window.add_action(&about_action);
 
     // Sidebar selection drives the content stack.
     let stack_for_select = stack.clone();
@@ -163,7 +181,7 @@ fn build_ui(app: &adw::Application) {
         while let Ok(update) = updates.try_recv() {
             match update {
                 Update::State(snapshot) => {
-                    overview.apply_state(&snapshot);
+                    dashboard.apply_state(&snapshot);
                     curve_page.apply_state(&snapshot);
                     sensors_page.apply_state(&snapshot);
                     settings_page.apply_state(&snapshot);
@@ -171,7 +189,7 @@ fn build_ui(app: &adw::Application) {
                 Update::Config(text) => match text.parse::<Config>() {
                     Ok(config) => {
                         *state_for_updates.config.borrow_mut() = Some(config.clone());
-                        overview.apply_config(&config);
+                        dashboard.apply_config(&config);
                         curve_page.apply_config(&config);
                         sensors_page.apply_config(&config);
                         settings_page.apply_config(&config);
@@ -190,590 +208,4 @@ fn build_ui(app: &adw::Application) {
     });
 
     window.present();
-}
-
-/// The Overview page: live temperatures, RPM, and the mode switch.
-struct OverviewPage {
-    root: adw::PreferencesPage,
-    mode_row: adw::ComboRow,
-    manual_row: adw::SpinRow,
-    fan_row: adw::ActionRow,
-    rpm_row: adw::ActionRow,
-    hysteresis_row: adw::SwitchRow,
-    temps_group: adw::PreferencesGroup,
-    /// Rows currently added to `temps_group`, keyed by sensor name, so their
-    /// values can be updated in place between rebuilds.
-    temp_rows: RefCell<Vec<(String, gtk::Widget, gtk::Label)>>,
-    chart: HistoryChart,
-    rpm_chart: HistoryChart,
-    updating: Rc<Cell<bool>>,
-    /// The most recent sensor snapshot, replayed when the ignore list changes.
-    last_temps: RefCell<Vec<SensorState>>,
-    /// Shared state, used to read the current `IgnoreSensors` list.
-    state: AppState,
-}
-
-impl OverviewPage {
-    fn new(state: &AppState) -> Self {
-        let root = adw::PreferencesPage::new();
-        let updating = Rc::new(Cell::new(false));
-
-        let status_group = adw::PreferencesGroup::new();
-        status_group.set_title("Status");
-        let fan_row = adw::ActionRow::builder().title("Fan").build();
-        let rpm_row = adw::ActionRow::builder().title("Speed").build();
-        let hysteresis_row = adw::SwitchRow::builder().title("Hysteresis").build();
-        status_group.add(&fan_row);
-        status_group.add(&rpm_row);
-        status_group.add(&hysteresis_row);
-
-        let mode_group = adw::PreferencesGroup::new();
-        mode_group.set_title("Mode");
-        let mode_row = adw::ComboRow::builder()
-            .title("Control mode")
-            .model(&gtk::StringList::new(&["BIOS", "Manual", "Smart"]))
-            .build();
-        mode_group.add(&mode_row);
-
-        let manual_adjustment = gtk::Adjustment::new(1.0, 1.0, 7.0, 1.0, 1.0, 0.0);
-        let manual_row = adw::SpinRow::new(Some(&manual_adjustment), 1.0, 0);
-        manual_row.set_title("Manual level");
-        manual_row.set_subtitle("applied in Manual mode");
-        mode_group.add(&manual_row);
-
-        let chart_group = adw::PreferencesGroup::new();
-        chart_group.set_title("Temperature history");
-        let chart = HistoryChart::new(
-            &[("CPU", (0.20, 0.60, 1.00)), ("GPU", (1.00, 0.50, 0.20))],
-            20.0,
-            100.0,
-        );
-        chart_group.add(chart.widget());
-
-        let rpm_group = adw::PreferencesGroup::new();
-        rpm_group.set_title("Fan speed history");
-        let rpm_chart = HistoryChart::new(&[("Fan", (0.30, 0.80, 0.40))], 0.0, 4500.0);
-        rpm_group.add(rpm_chart.widget());
-
-        let temps_group = adw::PreferencesGroup::new();
-        temps_group.set_title("Temperatures");
-
-        root.add(&status_group);
-        root.add(&mode_group);
-        root.add(&chart_group);
-        root.add(&rpm_group);
-        root.add(&temps_group);
-
-        let state_for_mode = state.clone();
-        let updating_for_mode = Rc::clone(&updating);
-        mode_row.connect_selected_notify(move |row| {
-            if updating_for_mode.get() {
-                return;
-            }
-            state_for_mode
-                .handle
-                .send(Command::SetMode(mode_name(row.selected()).to_string()));
-        });
-
-        let state_for_manual = state.clone();
-        let updating_for_manual = Rc::clone(&updating);
-        manual_row.connect_value_notify(move |row| {
-            if updating_for_manual.get() {
-                return;
-            }
-            state_for_manual.handle.send(Command::SetManualLevel(
-                row.value().round().clamp(1.0, 7.0) as u8,
-            ));
-        });
-
-        let state_for_hysteresis = state.clone();
-        let updating_for_hysteresis = Rc::clone(&updating);
-        hysteresis_row.connect_active_notify(move |row| {
-            if updating_for_hysteresis.get() {
-                return;
-            }
-            state_for_hysteresis
-                .handle
-                .send(Command::SetHysteresis(row.is_active()));
-        });
-
-        Self {
-            root,
-            mode_row,
-            manual_row,
-            fan_row,
-            rpm_row,
-            hysteresis_row,
-            temps_group,
-            temp_rows: RefCell::new(Vec::new()),
-            chart,
-            rpm_chart,
-            updating,
-            last_temps: RefCell::new(Vec::new()),
-            state: state.clone(),
-        }
-    }
-
-    fn widget(&self) -> &adw::PreferencesPage {
-        &self.root
-    }
-
-    fn apply_state(&self, state: &State) {
-        self.updating.set(true);
-        self.mode_row.set_selected(mode_index(&state.mode));
-        self.manual_row.set_value(f64::from(state.manual_level));
-        self.hysteresis_row.set_active(state.hysteresis_enabled);
-        self.updating.set(false);
-
-        self.fan_row.set_subtitle(&if state.bios_auto {
-            "BIOS auto".to_string()
-        } else {
-            format!("level {}", state.current_level)
-        });
-        self.rpm_row.set_subtitle(&format!("{} RPM", state.fan_rpm));
-
-        let cpu = temperature(&state.temperatures, "cpu");
-        let gpu = temperature(&state.temperatures, "gpu");
-        self.chart.push(&[cpu, gpu]);
-        self.rpm_chart.push(&[Some(f64::from(state.fan_rpm))]);
-
-        *self.last_temps.borrow_mut() = state.temperatures.clone();
-        self.update_temperatures(&state.temperatures);
-    }
-
-    /// Rebuild the temperature rows when the ignore list changes, so sensors
-    /// disabled in the configuration disappear from the overview immediately.
-    fn apply_config(&self, _config: &Config) {
-        let temps = self.last_temps.borrow().clone();
-        self.update_temperatures(&temps);
-    }
-
-    /// Rebuild the temperature rows when the sensor set changes, otherwise
-    /// update the existing rows in place so the fast refresh does not churn
-    /// widgets.
-    fn update_temperatures(&self, sensors: &[SensorState]) {
-        let mut rows = self.temp_rows.borrow_mut();
-
-        // Sensors listed in `IgnoreSensors` are hidden from the overview.
-        let config = self.state.config.borrow();
-        let sensors: Vec<&SensorState> = sensors
-            .iter()
-            .filter(|sensor| !sensor_is_ignored(config.as_ref(), sensor))
-            .collect();
-
-        if sensors.is_empty() {
-            if rows.len() == 1 && rows[0].0.is_empty() {
-                return;
-            }
-            for (_, row, _) in rows.drain(..) {
-                self.temps_group.remove(&row);
-            }
-            let row = adw::ActionRow::builder()
-                .title("No sensors reported")
-                .build();
-            self.temps_group.add(&row);
-            rows.push((String::new(), row.upcast(), gtk::Label::new(None)));
-            return;
-        }
-
-        let same_set = rows.len() == sensors.len()
-            && rows
-                .iter()
-                .zip(&sensors)
-                .all(|((name, _, _), sensor)| name == &sensor.name);
-        if same_set {
-            for ((_, _, label), sensor) in rows.iter().zip(&sensors) {
-                label.set_text(&format!("{} °C", sensor.celsius));
-            }
-            return;
-        }
-
-        for (_, row, _) in rows.drain(..) {
-            self.temps_group.remove(&row);
-        }
-        for sensor in &sensors {
-            let row = adw::ActionRow::builder()
-                .title(&sensor.name)
-                .subtitle(format!("0x{:02X}", sensor.offset))
-                .build();
-            let label = gtk::Label::new(Some(&format!("{} °C", sensor.celsius)));
-            row.add_suffix(&label);
-            self.temps_group.add(&row);
-            rows.push((sensor.name.clone(), row.upcast(), label));
-        }
-    }
-}
-
-/// Whether a sensor is excluded by the configuration's `IgnoreSensors` list.
-///
-/// Entries may be sensor names (e.g. `pwr`) or hex register offsets
-/// (e.g. `x7d`), matching the engine's ignore semantics.
-fn sensor_is_ignored(config: Option<&Config>, sensor: &SensorState) -> bool {
-    let Some(config) = config else {
-        return false;
-    };
-    let name = sensor.name.to_ascii_lowercase();
-    let offset_key = format!("x{:02x}", sensor.offset);
-    config.sensors.ignore.iter().any(|entry| {
-        let entry = entry.trim().to_ascii_lowercase();
-        entry == name || entry == offset_key
-    })
-}
-
-/// The temperature of the named sensor, if present.
-fn temperature(sensors: &[SensorState], name: &str) -> Option<f64> {
-    sensors
-        .iter()
-        .find(|sensor| sensor.name == name)
-        .map(|sensor| f64::from(sensor.celsius))
-}
-
-/// The Smart Curve page: a draggable curve plus precise threshold editors.
-struct CurvePage {
-    root: adw::PreferencesPage,
-    editor: CurveEditor,
-    levels_group: adw::PreferencesGroup,
-    /// Rows currently added to `levels_group`, so they can be removed on rebuild.
-    level_rows: RefCell<Vec<gtk::Widget>>,
-    state: AppState,
-    updating: Rc<Cell<bool>>,
-}
-
-impl CurvePage {
-    fn new(state: &AppState) -> Self {
-        let root = adw::PreferencesPage::new();
-        let updating = Rc::new(Cell::new(false));
-
-        let editor_group = adw::PreferencesGroup::new();
-        editor_group.set_title("Smart curve");
-        editor_group.set_description(Some(
-            "Drag a point to change its temperature and fan level.",
-        ));
-        let editor = CurveEditor::new();
-        editor_group.add(editor.widget());
-
-        let levels_group = adw::PreferencesGroup::new();
-        levels_group.set_title("Thresholds");
-
-        root.add(&editor_group);
-        root.add(&levels_group);
-
-        let state_for_editor = state.clone();
-        editor.connect_changed(move |levels| {
-            let config = state_for_editor.config.borrow().clone();
-            if let Some(mut config) = config {
-                match config.smart_modes.first_mut() {
-                    Some(mode) => mode.levels = levels,
-                    None => config.smart_modes.push(SmartMode {
-                        label: None,
-                        levels,
-                        extra: Default::default(),
-                    }),
-                }
-                state_for_editor.set_config(&config);
-            }
-        });
-
-        Self {
-            root,
-            editor,
-            levels_group,
-            level_rows: RefCell::new(Vec::new()),
-            state: state.clone(),
-            updating,
-        }
-    }
-
-    fn widget(&self) -> &adw::PreferencesPage {
-        &self.root
-    }
-
-    fn apply_config(&self, config: &Config) {
-        let levels = config
-            .smart_modes
-            .first()
-            .map(|mode| mode.levels.clone())
-            .unwrap_or_default();
-        self.editor.set_levels(levels.clone());
-
-        for row in self.level_rows.borrow_mut().drain(..) {
-            self.levels_group.remove(&row);
-        }
-        for (index, level) in levels.iter().enumerate() {
-            let adjustment =
-                gtk::Adjustment::new(f64::from(level.temperature), 0.0, 127.0, 1.0, 5.0, 0.0);
-            let row = adw::SpinRow::new(Some(&adjustment), 1.0, 0);
-            row.set_title(&format!("Level {} temperature", index + 1));
-            row.set_subtitle(&format!("fan level {}", level.fan_level));
-
-            let state_for_row = self.state.clone();
-            let updating = Rc::clone(&self.updating);
-            row.connect_value_notify(move |row| {
-                if updating.get() {
-                    return;
-                }
-                let config = state_for_row.config.borrow().clone();
-                if let Some(mut config) = config {
-                    if let Some(mode) = config.smart_modes.first_mut() {
-                        if let Some(level) = mode.levels.get_mut(index) {
-                            level.temperature = row.value().round().clamp(0.0, 127.0) as u8;
-                        }
-                    }
-                    state_for_row.set_config(&config);
-                }
-            });
-            self.levels_group.add(&row);
-            self.level_rows.borrow_mut().push(row.upcast());
-        }
-    }
-
-    fn apply_state(&self, _state: &State) {}
-}
-
-/// The Sensors page: enable/disable, rename, and ignore sensors.
-struct SensorsPage {
-    root: adw::PreferencesPage,
-    group: adw::PreferencesGroup,
-    /// Rows currently added to `group`, so they can be removed on rebuild.
-    rows: RefCell<Vec<gtk::Widget>>,
-    state: AppState,
-    known: Rc<RefCell<Vec<String>>>,
-}
-
-impl SensorsPage {
-    fn new(state: &AppState) -> Self {
-        let root = adw::PreferencesPage::new();
-        let group = adw::PreferencesGroup::new();
-        group.set_title("Sensors");
-        group.set_description(Some(
-            "Disable a sensor to exclude it from the smart-mode maximum.",
-        ));
-        root.add(&group);
-        Self {
-            root,
-            group,
-            rows: RefCell::new(Vec::new()),
-            state: state.clone(),
-            known: Rc::new(RefCell::new(Vec::new())),
-        }
-    }
-
-    fn widget(&self) -> &adw::PreferencesPage {
-        &self.root
-    }
-
-    fn apply_state(&self, state: &State) {
-        let mut names: Vec<String> = state
-            .temperatures
-            .iter()
-            .map(|sensor| sensor.name.clone())
-            .collect();
-        names.sort();
-        names.dedup();
-        if names.is_empty() || *self.known.borrow() == names {
-            return;
-        }
-        *self.known.borrow_mut() = names.clone();
-
-        for row in self.rows.borrow_mut().drain(..) {
-            self.group.remove(&row);
-        }
-        let config = self.state.config.borrow().clone();
-        for name in names {
-            let ignored = config
-                .as_ref()
-                .is_some_and(|config| config.sensors.ignore.iter().any(|entry| entry == &name));
-            let expander = adw::ExpanderRow::builder().title(&name).build();
-
-            let switch = adw::SwitchRow::builder().title("Enabled").build();
-            switch.set_active(!ignored);
-            let state_for_switch = self.state.clone();
-            let name_for_switch = name.clone();
-            switch.connect_active_notify(move |row| {
-                let config = state_for_switch.config.borrow().clone();
-                if let Some(mut config) = config {
-                    if row.is_active() {
-                        config
-                            .sensors
-                            .ignore
-                            .retain(|entry| entry != &name_for_switch);
-                    } else if !config.sensors.ignore.contains(&name_for_switch) {
-                        config.sensors.ignore.push(name_for_switch.clone());
-                    }
-                    state_for_switch.set_config(&config);
-                }
-            });
-            expander.add_row(&switch);
-
-            let entry = adw::EntryRow::builder().title("Display name").build();
-            if let Some(config) = &config {
-                if let Some((_, display)) = config
-                    .sensors
-                    .names
-                    .iter()
-                    .find(|(_, display)| display.as_str() == name)
-                {
-                    entry.set_text(display);
-                }
-            }
-            let state_for_entry = self.state.clone();
-            let name_for_entry = name.clone();
-            entry.connect_apply(move |entry| {
-                let config = state_for_entry.config.borrow().clone();
-                if let Some(mut config) = config {
-                    let display = entry.text().to_string();
-                    if let Some((sequence, _)) = config
-                        .sensors
-                        .names
-                        .iter()
-                        .find(|(_, value)| value.as_str() == name_for_entry)
-                        .map(|(sequence, value)| (*sequence, value.clone()))
-                    {
-                        config.sensors.names.insert(sequence, display);
-                        state_for_entry.set_config(&config);
-                    }
-                }
-            });
-            expander.add_row(&entry);
-
-            self.group.add(&expander);
-            self.rows.borrow_mut().push(expander.upcast());
-        }
-    }
-
-    fn apply_config(&self, _config: &Config) {}
-}
-
-/// The Settings page: cycle interval, start behaviour, and config path.
-struct SettingsPage {
-    root: adw::PreferencesPage,
-    cycle_row: adw::SpinRow,
-    start_minimized_row: adw::SwitchRow,
-    config_path_row: adw::ActionRow,
-    updating: Rc<Cell<bool>>,
-}
-
-impl SettingsPage {
-    fn new(state: &AppState) -> Self {
-        let root = adw::PreferencesPage::new();
-        let updating = Rc::new(Cell::new(false));
-
-        let group = adw::PreferencesGroup::new();
-        group.set_title("Daemon");
-
-        let adjustment = gtk::Adjustment::new(5.0, 1.0, 60.0, 1.0, 5.0, 0.0);
-        let cycle_row = adw::SpinRow::new(Some(&adjustment), 1.0, 0);
-        cycle_row.set_title("Cycle interval");
-        cycle_row.set_subtitle("seconds between sensor reads");
-
-        let start_minimized_row = adw::SwitchRow::builder().title("Start minimized").build();
-
-        let config_path_row = adw::ActionRow::builder().title("Configuration").build();
-
-        let reload_row = adw::ActionRow::builder()
-            .title("Reload configuration")
-            .subtitle("re-read the file from disk")
-            .build();
-        let reload_button = gtk::Button::with_label("Reload");
-        reload_button.add_css_class("flat");
-        reload_button.set_valign(gtk::Align::Center);
-        reload_row.add_suffix(&reload_button);
-        reload_row.set_activatable_widget(Some(&reload_button));
-
-        group.add(&cycle_row);
-        group.add(&start_minimized_row);
-        group.add(&config_path_row);
-        group.add(&reload_row);
-        root.add(&group);
-
-        let state_for_reload = state.clone();
-        reload_button.connect_clicked(move |_| {
-            state_for_reload.handle.send(Command::ReloadConfig);
-            state_for_reload.toast("Reloading configuration…");
-        });
-
-        let state_for_cycle = state.clone();
-        let updating_for_cycle = Rc::clone(&updating);
-        cycle_row.connect_value_notify(move |row| {
-            if updating_for_cycle.get() {
-                return;
-            }
-            let config = state_for_cycle.config.borrow().clone();
-            if let Some(mut config) = config {
-                config.general.cycle = row.value().round().max(1.0) as u32;
-                state_for_cycle.set_config(&config);
-            }
-        });
-
-        let state_for_start = state.clone();
-        let updating_for_start = Rc::clone(&updating);
-        start_minimized_row.connect_active_notify(move |row| {
-            if updating_for_start.get() {
-                return;
-            }
-            let config = state_for_start.config.borrow().clone();
-            if let Some(mut config) = config {
-                config.general.start_minimized = row.is_active();
-                state_for_start.set_config(&config);
-            }
-        });
-
-        Self {
-            root,
-            cycle_row,
-            start_minimized_row,
-            config_path_row,
-            updating,
-        }
-    }
-
-    fn widget(&self) -> &adw::PreferencesPage {
-        &self.root
-    }
-
-    fn apply_config(&self, config: &Config) {
-        self.updating.set(true);
-        self.cycle_row.set_value(f64::from(config.general.cycle));
-        self.start_minimized_row
-            .set_active(config.general.start_minimized);
-        self.updating.set(false);
-    }
-
-    fn apply_state(&self, state: &State) {
-        self.config_path_row.set_subtitle(&state.config_path);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mode_index_and_name_round_trip() {
-        for (index, name) in [(0, "bios"), (1, "manual"), (2, "smart")] {
-            assert_eq!(mode_index(name), index);
-            assert_eq!(mode_name(index), name);
-        }
-        assert_eq!(mode_index("unknown"), 0);
-        assert_eq!(mode_name(99), "bios");
-    }
-
-    #[test]
-    fn ignored_sensors_are_hidden_by_name_or_offset() {
-        let config: Config = "IgnoreSensors=pwr,x7d\n".parse().unwrap();
-        let sensor = |name: &str, offset: u8| SensorState {
-            name: name.to_string(),
-            offset,
-            celsius: 40,
-        };
-
-        // Ignored by name.
-        assert!(sensor_is_ignored(Some(&config), &sensor("pwr", 0xC0)));
-        // Ignored by hex register offset.
-        assert!(sensor_is_ignored(Some(&config), &sensor("no5", 0x7D)));
-        // Not ignored.
-        assert!(!sensor_is_ignored(Some(&config), &sensor("cpu", 0x78)));
-        // Without a loaded config nothing is hidden.
-        assert!(!sensor_is_ignored(None, &sensor("pwr", 0xC0)));
-    }
 }

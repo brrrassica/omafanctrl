@@ -32,7 +32,7 @@ omafanctrl hysteresis on
 omafanctrl hysteresis toggle
 ```
 
-or from the GUI Overview page. The setting is persisted as `Hysteresis` in
+or from the GUI Dashboard. The setting is persisted as `Hysteresis` in
 `[General]`.
 
 ### Minimum dwell time
