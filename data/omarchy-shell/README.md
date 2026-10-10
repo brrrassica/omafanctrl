@@ -6,25 +6,45 @@ from `~/.config/omarchy/shell.json`.
 
 `omafanctrl-status` is a **custom command module**: the bar runs its `exec` on an
 `interval` and parses the "Waybar-style JSON" it prints (`text`, `tooltip`,
-`class`/`alt`).
+`class`/`alt`). The module shows the **CPU temperature followed by the fan
+speed** (`--show cpu,rpm`), so the bar reads as a stable CPU readout rather than
+whichever sensor happens to be hottest.
+
+## Placement
+
+The module lives in the **center** section, inserted at the front of
+`bar.layout.center`. The center section is anchored on `omarchy.clock`, and
+entries listed before the anchor render to its left, so the front of the array
+is the leftmost slot. The resulting left-to-right order is:
+
+```
+omarchy.workspaces (left section) · omafanctrl · omarchy.indicators · omarchy.clock
+```
+
+That puts the fan readout between the desktop switcher and the clock, with the
+default hidden controls (`omarchy.indicators`: Dictate, Screen Recording, …)
+between it and the clock.
 
 ## Add the module
 
-Run the helper, which merges the entry into `bar.layout.right` idempotently and
-seeds `shell.json` from the Omarchy defaults when it does not exist yet:
+Run the helper, which merges the entry into `bar.layout.center` idempotently,
+moves it there if it is already in another section, and seeds `shell.json` from
+the Omarchy defaults when it does not exist yet:
 
 ```sh
 data/omarchy-shell/install-module.sh
 ```
 
 Or add the entry from [`omafanctrl.json`](omafanctrl.json) to
-`bar.layout.<left|center|right>` in `~/.config/omarchy/shell.json` by hand:
+`bar.layout.<left|center|right>` in `~/.config/omarchy/shell.json` by hand
+(place it before `omarchy.clock` in the `center` array to sit left of the
+clock):
 
 ```json
 {
   "id": "omafanctrl",
   "type": "command",
-  "exec": "omafanctrl-status --show icon,mode,rpm,temp",
+  "exec": "omafanctrl-status --show cpu,rpm",
   "interval": 2,
   "tooltip": "Fan control",
   "onClick": "omafanctrl mode cycle --notify",

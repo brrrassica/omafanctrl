@@ -16,7 +16,7 @@ in one step:
 ```sh
 curl -LO https://github.com/brrrassica/omafanctrl/releases/latest/download/omafanctrl.zip
 unzip omafanctrl.zip
-cd omafanctrl-1.0.2
+cd omafanctrl-1.1.1
 ./install.sh
 ```
 
@@ -25,7 +25,7 @@ and refuses to run on anything other than Omarchy 4 on a ThinkPad.
 
 Other options: the AUR (`yay -S omafanctrl`) or a manual build — see
 [docs/install.md](docs/install.md). The latest release is
-[`v1.0.2`](https://github.com/brrrassica/omafanctrl/releases/tag/v1.0.2); the
+[`v1.1.1`](https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.1); the
 change history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Components
@@ -120,7 +120,7 @@ data/omarchy-shell/install-module.sh
 {
   "id": "omafanctrl",
   "type": "command",
-  "exec": "omafanctrl-status --show icon,mode,rpm,temp",
+  "exec": "omafanctrl-status --show cpu,rpm",
   "interval": 2,
   "tooltip": "Fan control",
   "onClick": "omafanctrl mode cycle --notify",

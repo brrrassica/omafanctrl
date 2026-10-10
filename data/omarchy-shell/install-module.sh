@@ -4,7 +4,10 @@
 #
 # Merges a `type: "command"` entry into the `bar.layout.<section>` array of
 # ~/.config/omarchy/shell.json, seeding the file from the Omarchy defaults when
-# it does not exist yet. Idempotent: re-running never duplicates the entry.
+# it does not exist yet. The default section is `center`, where the entry is
+# inserted at the front so it sits left of the clock anchor (and left of the
+# `omarchy.indicators` hidden controls). Idempotent: re-running never
+# duplicates the entry, and moves it if it is already in another section.
 #
 # Usage:
 #   install-module.sh [--config <path>] [--defaults <path>] [--section <left|center|right>]
@@ -16,7 +19,7 @@ set -euo pipefail
 
 config="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
 defaults="${OMARCHY_PATH:-/usr/share/omarchy}/config/omarchy/shell.json"
-section="right"
+section="center"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,7 +36,7 @@ case "$section" in
   *) echo "section must be left, center, or right" >&2; exit 2 ;;
 esac
 
-module='{"id":"omafanctrl","type":"command","exec":"omafanctrl-status --show icon,mode,rpm,temp","interval":2,"tooltip":"Fan control","onClick":"omafanctrl mode cycle --notify","onRightClick":"omafanctrl toggle --notify","onMiddleClick":"omafanctrl status --notify"}'
+module='{"id":"omafanctrl","type":"command","exec":"omafanctrl-status --show cpu,rpm","interval":2,"tooltip":"Fan control","onClick":"omafanctrl mode cycle --notify","onRightClick":"omafanctrl toggle --notify","onMiddleClick":"omafanctrl status --notify"}'
 
 mkdir -p "$(dirname "$config")"
 
@@ -54,6 +57,8 @@ if command -v jq >/dev/null 2>&1; then
   jq -S -e --argjson module "$module" --arg section "$section" '
     def object_or_empty: if type == "object" then . else {} end;
     def array_or_empty: if type == "array" then . else [] end;
+    def entry_id: if type == "object" then (.id // "") else tostring end;
+    def without_omafanctrl: [.[] | select(entry_id != "omafanctrl")];
     object_or_empty
     | .version = 1
     | .bar = (.bar | object_or_empty)
@@ -62,11 +67,15 @@ if command -v jq >/dev/null 2>&1; then
     | .bar.layout.center = (.bar.layout.center | array_or_empty)
     | .bar.layout.right = (.bar.layout.right | array_or_empty)
     | .plugins = (.plugins | array_or_empty)
-    | ([.bar.layout.left[], .bar.layout.center[], .bar.layout.right[]]
-        | map(if type == "object" then (.id // "") else tostring end)
-        | index("omafanctrl")) as $present
-    | if $present != null then .
-      else .bar.layout[$section] += [$module]
+    | if ([.bar.layout[$section][] | entry_id] | index("omafanctrl")) != null then .
+      else
+        .bar.layout.left = (.bar.layout.left | without_omafanctrl)
+        | .bar.layout.center = (.bar.layout.center | without_omafanctrl)
+        | .bar.layout.right = (.bar.layout.right | without_omafanctrl)
+        | if $section == "center"
+          then .bar.layout.center = [$module] + .bar.layout.center
+          else .bar.layout[$section] = .bar.layout[$section] + [$module]
+          end
       end
   ' "$config" >"$tmp"
 elif command -v python3 >/dev/null 2>&1; then
@@ -87,14 +96,24 @@ bar["layout"] = layout
 for key in ("left", "center", "right"):
     if not isinstance(layout.get(key), list):
         layout[key] = []
+
+
+def entry_id(entry):
+    if isinstance(entry, dict):
+        return str(entry.get("id", ""))
+    return str(entry)
+
+
+if not any(entry_id(entry) == "omafanctrl" for entry in layout[section]):
+    for key in ("left", "center", "right"):
+        layout[key] = [entry for entry in layout[key] if entry_id(entry) != "omafanctrl"]
+    if section == "center":
+        layout["center"].insert(0, module)
+    else:
+        layout[section].append(module)
+
 if not isinstance(data.get("plugins"), list):
     data["plugins"] = []
-ids = [
-    entry.get("id") if isinstance(entry, dict) else str(entry)
-    for entry in layout["left"] + layout["center"] + layout["right"]
-]
-if "omafanctrl" not in ids:
-    layout[section].append(module)
 json.dump(data, sys.stdout, indent=2, sort_keys=True)
 sys.stdout.write("\n")
 PY

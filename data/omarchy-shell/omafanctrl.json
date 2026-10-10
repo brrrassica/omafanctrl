@@ -1,7 +1,7 @@
 {
   "id": "omafanctrl",
   "type": "command",
-  "exec": "omafanctrl-status --show icon,mode,rpm,temp",
+  "exec": "omafanctrl-status --show cpu,rpm",
   "interval": 2,
   "tooltip": "Fan control",
   "onClick": "omafanctrl mode cycle --notify",

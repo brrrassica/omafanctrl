@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-10-10
+
+### Added
+
+- `omafanctrl-status --show cpu` renders the CPU sensor specifically, rather
+  than the hottest sensor across the board.
+
+### Changed
+
+- **Bar module relocated.** The `omafanctrl` status module now sits in the
+  `center` section, immediately left of the `omarchy.indicators` hidden controls
+  and the `omarchy.clock` anchor, instead of the `right` section. The installer
+  inserts it at the front of `bar.layout.center` and moves it there if it is
+  already in another section.
+- **Bar module content.** The module now shows the CPU temperature followed by
+  the fan speed (`--show cpu,rpm`, for example `56°C 3900 RPM`) instead of the
+  mode/RPM/max-temperature mix, and its tooltip lists only the CPU sensor rather
+  than every EC sensor the daemon exposes (including the profile's ignored ones).
+
+[1.1.1]: https://github.com/omafanctrl/omafanctrl/releases/tag/v1.1.1
+
 ## [1.1.0] - 2026-10-09
 
 ### Changed

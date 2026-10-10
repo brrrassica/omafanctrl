@@ -11,7 +11,7 @@
 //! {
 //!   "id": "omafanctrl",
 //!   "type": "command",
-//!   "exec": "omafanctrl-status --show icon,mode,rpm,temp",
+//!   "exec": "omafanctrl-status --show cpu",
 //!   "interval": 2,
 //!   "tooltip": "Fan control",
 //!   "onClick": "omafanctrl mode cycle --notify",
@@ -34,7 +34,7 @@ use omafanctrl_core::dbus::State;
     about = "Status module for the Omarchy Quattro bar"
 )]
 struct Args {
-    /// Fields to show, comma-separated: `icon`, `mode`, `rpm`, `temp`.
+    /// Fields to show, comma-separated: `icon`, `mode`, `rpm`, `temp`, `cpu`.
     #[arg(long, default_value = "icon,mode")]
     show: String,
 
@@ -112,6 +112,13 @@ fn render_text(state: &State, args: &Args) -> String {
                     parts.push(format!("{max}°C"));
                 }
             }
+            // The CPU sensor only, so the bar can show a stable CPU temperature
+            // instead of whichever sensor happens to be hottest.
+            "cpu" => {
+                if let Some(sensor) = state.temperatures.iter().find(|sensor| sensor.name == "cpu") {
+                    parts.push(format!("{}°C", sensor.celsius));
+                }
+            }
             _ => {}
         }
     }
@@ -119,6 +126,10 @@ fn render_text(state: &State, args: &Args) -> String {
 }
 
 /// Render the multi-line tooltip.
+///
+/// Only the CPU sensor is listed: the daemon exposes every EC sensor, including
+/// the ones the profile's `IgnoreSensors` list excludes from fan control, and
+/// dumping them all into the tooltip is noise.
 fn render_tooltip(state: &State) -> String {
     let fan = if state.bios_auto {
         "BIOS auto".to_string()
@@ -138,11 +149,9 @@ fn render_tooltip(state: &State) -> String {
             }
         ),
     ];
-    if !state.temperatures.is_empty() {
+    if let Some(sensor) = state.temperatures.iter().find(|sensor| sensor.name == "cpu") {
         lines.push(String::new());
-        for sensor in &state.temperatures {
-            lines.push(format!("{}: {} °C", sensor.name, sensor.celsius));
-        }
+        lines.push(format!("CPU: {} °C", sensor.celsius));
     }
     lines.join("\n")
 }
@@ -195,6 +204,18 @@ mod tests {
     }
 
     #[test]
+    fn renders_cpu_temperature_only() {
+        let state = sample_state();
+        // The CPU sensor (62°C) wins even though the max across sensors is the
+        // same here; a hotter GPU must not leak into the `cpu` field.
+        assert_eq!(render_text(&state, &args("cpu", "")), "62°C");
+        let mut hotter_gpu = sample_state();
+        hotter_gpu.temperatures[1].celsius = 90;
+        assert_eq!(render_text(&hotter_gpu, &args("cpu", "")), "62°C");
+        assert_eq!(render_text(&hotter_gpu, &args("temp", "")), "90°C");
+    }
+
+    #[test]
     fn omits_an_empty_icon() {
         let state = sample_state();
         assert_eq!(render_text(&state, &args("icon,mode", "")), "Smart");
@@ -209,11 +230,13 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_includes_sensors() {
+    fn tooltip_shows_only_the_cpu_sensor() {
         let tooltip = render_tooltip(&sample_state());
         assert!(tooltip.contains("Mode: Smart"));
         assert!(tooltip.contains("Speed: 3900 RPM"));
-        assert!(tooltip.contains("cpu: 62 °C"));
-        assert!(tooltip.contains("gpu: 55 °C"));
+        assert!(tooltip.contains("CPU: 62 °C"));
+        // The GPU sensor must not leak into the tooltip.
+        assert!(!tooltip.contains("gpu"));
+        assert!(!tooltip.contains("GPU"));
     }
 }
