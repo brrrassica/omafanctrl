@@ -115,7 +115,11 @@ fn render_text(state: &State, args: &Args) -> String {
             // The CPU sensor only, so the bar can show a stable CPU temperature
             // instead of whichever sensor happens to be hottest.
             "cpu" => {
-                if let Some(sensor) = state.temperatures.iter().find(|sensor| sensor.name == "cpu") {
+                if let Some(sensor) = state
+                    .temperatures
+                    .iter()
+                    .find(|sensor| sensor.name == "cpu")
+                {
                     parts.push(format!("{}°C", sensor.celsius));
                 }
             }
@@ -149,7 +153,11 @@ fn render_tooltip(state: &State) -> String {
             }
         ),
     ];
-    if let Some(sensor) = state.temperatures.iter().find(|sensor| sensor.name == "cpu") {
+    if let Some(sensor) = state
+        .temperatures
+        .iter()
+        .find(|sensor| sensor.name == "cpu")
+    {
         lines.push(String::new());
         lines.push(format!("CPU: {} °C", sensor.celsius));
     }
