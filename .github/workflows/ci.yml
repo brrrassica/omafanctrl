@@ -14,14 +14,15 @@ jobs:
   # job: the tagged commit was already checked when it landed on the branch, so
   # re-running the suite on the tag would just duplicate work.
   #
-  # The jobs run in an Arch Linux container because the GUI requires
-  # libadwaita >= 1.7, which the ubuntu-latest runner does not provide. Arch is
-  # also the target platform (Omarchy Quattro).
+  # The jobs run on the repo's self-hosted runners (Debian 13, rootless Docker)
+  # inside an Arch Linux container because the GUI requires libadwaita >= 1.7,
+  # which the Debian 13 host does not provide. Arch is also the target platform
+  # (Omarchy Quattro).
   check:
     name: Format, lint, test, build
     if: "!startsWith(github.ref, 'refs/tags/')"
-    runs-on: ubuntu-latest
-    container: archlinux:latest
+    runs-on: [self-hosted, Linux, X64, opencode-sam, debian-13, omafanctrl]
+    container: archlinux:base-devel
     steps:
       - name: Install system dependencies
         run: |
@@ -47,8 +48,8 @@ jobs:
   package:
     name: Build binaries and package
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    container: archlinux:latest
+    runs-on: [self-hosted, Linux, X64, opencode-sam, debian-13, omafanctrl]
+    container: archlinux:base-devel
     steps:
       - name: Install system dependencies
         run: |
@@ -106,7 +107,7 @@ jobs:
 
   release:
     name: Publish release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, opencode-sam, debian-13, omafanctrl]
     needs: package
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
