@@ -13,11 +13,11 @@
 # distribution or hardware it refuses to run.
 #
 # Usage:
-#   ./install.sh                 # install (re-execs itself with sudo)
-#   sudo ./install.sh            # same, already root
-#   ./install.sh --no-user-setup  # skip the per-user Hyprland/bar wiring
-#   ./install.sh --skip-preflight # bypass the Omarchy/ThinkPad checks (testing)
-#   ./install.sh --help
+#   ./scripts/install.sh                 # install (re-execs itself with sudo)
+#   sudo ./scripts/install.sh            # same, already root
+#   ./scripts/install.sh --no-user-setup  # skip the per-user Hyprland/bar wiring
+#   ./scripts/install.sh --skip-preflight # bypass the Omarchy/ThinkPad checks (testing)
+#   ./scripts/install.sh --help
 #
 # The script is idempotent: re-running it upgrades the binaries and system files
 # in place and never duplicates the user-level snippets.
@@ -65,7 +65,7 @@ SKIP_PREFLIGHT=0
 ORIG_ARGS=("$@")
 
 usage() {
-  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -85,21 +85,24 @@ done
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+# The script lives in scripts/, so the payload (bin/, data/, Cargo.toml) is one
+# level up, at the root of the release bundle or the source checkout.
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # The release zip ships prebuilt binaries in ./bin; a source checkout builds
 # them into ./target/release.
-if [[ -d "$SCRIPT_DIR/bin" && -x "$SCRIPT_DIR/bin/$DAEMON_BIN" ]]; then
-  BIN_DIR="$SCRIPT_DIR/bin"
+if [[ -d "$ROOT_DIR/bin" && -x "$ROOT_DIR/bin/$DAEMON_BIN" ]]; then
+  BIN_DIR="$ROOT_DIR/bin"
   PREBUILT=1
-elif [[ -d "$SCRIPT_DIR/target/release" && -x "$SCRIPT_DIR/target/release/$DAEMON_BIN" ]]; then
-  BIN_DIR="$SCRIPT_DIR/target/release"
+elif [[ -d "$ROOT_DIR/target/release" && -x "$ROOT_DIR/target/release/$DAEMON_BIN" ]]; then
+  BIN_DIR="$ROOT_DIR/target/release"
   PREBUILT=1
 else
-  BIN_DIR="$SCRIPT_DIR/target/release"
+  BIN_DIR="$ROOT_DIR/target/release"
   PREBUILT=0
 fi
 
-DATA_DIR="$SCRIPT_DIR/data"
+DATA_DIR="$ROOT_DIR/data"
 
 # ---------------------------------------------------------------------------
 # Re-exec with sudo
@@ -225,12 +228,12 @@ fi
 # ---------------------------------------------------------------------------
 
 if [[ "$PREBUILT" -eq 0 ]]; then
-  [[ -f "$SCRIPT_DIR/Cargo.toml" ]] \
-    || die "no prebuilt binaries and no Cargo.toml; run install.sh from the release zip or the source tree"
+  [[ -f "$ROOT_DIR/Cargo.toml" ]] \
+    || die "no prebuilt binaries and no Cargo.toml; run scripts/install.sh from the release zip or the source tree"
   command -v cargo >/dev/null 2>&1 || die "cargo is not available after installing rust"
   info "Building the workspace (release)"
-  ( cd "$SCRIPT_DIR" && cargo build --release --locked --workspace )
-  BIN_DIR="$SCRIPT_DIR/target/release"
+  ( cd "$ROOT_DIR" && cargo build --release --locked --workspace )
+  BIN_DIR="$ROOT_DIR/target/release"
 fi
 
 for bin in "$DAEMON_BIN" "$CLI_BIN" "$STATUS_BIN" "$GUI_BIN"; do

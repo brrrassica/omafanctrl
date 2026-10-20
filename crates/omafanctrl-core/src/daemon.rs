@@ -30,7 +30,7 @@ use crate::config::{Config, ConfigWatcher};
 use crate::dbus::{Command, ControlService, SensorState, State};
 use crate::ec::{Ec, EcBackend, EcError};
 use crate::engine::{
-    Engine, EngineError, EnginePolicy, SensorReading, Watchdog, apply_decision,
+    Engine, EngineError, EnginePolicy, Mode, SensorReading, Watchdog, apply_decision,
     read_sensor_readings,
 };
 use crate::probe::KNOWN_SENSOR_OFFSETS;
@@ -63,7 +63,11 @@ pub struct Daemon<B: EcBackend> {
 impl<B: EcBackend> Daemon<B> {
     /// Create a daemon around an EC handle and an initial configuration.
     pub fn new(ec: Ec<B>, config: Config, config_path: PathBuf) -> Self {
-        let engine = Engine::new(EnginePolicy::from_config(&config));
+        let mut engine = Engine::new(EnginePolicy::from_config(&config));
+        // Start in the mode selected by the configuration's `Active` value
+        // (0 = BIOS, 1/2 = Smart, 3 = Manual). The default configuration uses
+        // Smart, so a fresh install boots into smart control rather than BIOS.
+        engine.set_mode(Mode::from_active(config.general.active));
         let watcher = ConfigWatcher::new(config_path.clone());
         let (state_tx, _state_rx) = watch::channel(State::default());
         let (config_tx, _config_rx) = watch::channel(config.to_ini());
@@ -364,6 +368,40 @@ mod tests {
 
     fn smart_config() -> Config {
         "Level=50 2 0 0\nLevel=60 3 0 0\n".parse().unwrap()
+    }
+
+    #[test]
+    fn daemon_starts_in_smart_mode_by_default() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        let mut daemon = Daemon::new(
+            ec(backend),
+            smart_config(),
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+        let mut state_rx = daemon.state_receiver();
+
+        // No explicit SetMode: the default `Active=2` selects smart control.
+        daemon.tick(Instant::now()).unwrap();
+
+        assert_eq!(daemon.engine().mode(), Mode::Smart);
+        assert_eq!(control_register(&bytes), 3);
+        let state = state_rx.borrow_and_update().clone();
+        assert_eq!(state.mode, "smart");
+    }
+
+    #[test]
+    fn daemon_honours_active_bios() {
+        let (backend, _bytes) = SharedBackend::new();
+        let config: Config = "Active=0\nLevel=50 2 0 0\nLevel=60 3 0 0\n"
+            .parse()
+            .unwrap();
+        let daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+        assert_eq!(daemon.engine().mode(), Mode::Bios);
     }
 
     #[test]

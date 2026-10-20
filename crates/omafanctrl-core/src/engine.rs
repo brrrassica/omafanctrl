@@ -71,6 +71,19 @@ impl Mode {
             Mode::Smart => "smart",
         }
     }
+
+    /// Map a TPFanCtrl2 `Active` value to a startup mode.
+    ///
+    /// `0` = BIOS, `1`/`2` = Smart (the engine implements a single smart mode),
+    /// and `3` = Manual. Any other value falls back to [`Mode::Smart`], the
+    /// default startup mode.
+    pub fn from_active(active: u8) -> Self {
+        match active {
+            0 => Mode::Bios,
+            3 => Mode::Manual,
+            _ => Mode::Smart,
+        }
+    }
 }
 
 /// A named temperature reading from a single sensor.
@@ -909,6 +922,16 @@ mod tests {
         assert_eq!(Mode::Manual.next(), Mode::Smart);
         assert_eq!(Mode::Smart.next(), Mode::Bios);
         assert_eq!(Mode::Smart.as_str(), "smart");
+    }
+
+    #[test]
+    fn active_maps_to_startup_mode() {
+        assert_eq!(Mode::from_active(0), Mode::Bios);
+        assert_eq!(Mode::from_active(1), Mode::Smart);
+        assert_eq!(Mode::from_active(2), Mode::Smart);
+        assert_eq!(Mode::from_active(3), Mode::Manual);
+        // Out-of-range values fall back to the default startup mode.
+        assert_eq!(Mode::from_active(9), Mode::Smart);
     }
 
     #[test]

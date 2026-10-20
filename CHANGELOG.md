@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Lifecycle scripts.** The installer now lives at
+  [`scripts/install.sh`](scripts/install.sh), alongside three new scripts:
+  [`scripts/uninstall.sh`](scripts/uninstall.sh) (reverses the install, keeping
+  `/etc/omafanctrl` unless `--purge` is given),
+  [`scripts/restart-all.sh`](scripts/restart-all.sh) (reloads `ec_sys`, restarts
+  the daemon, and reloads the omarchy-shell bar module), and
+  [`scripts/doctor.sh`](scripts/doctor.sh) (a read-only PASS/WARN/FAIL
+  diagnostic of the platform, module, files, and daemon).
+
+### Changed
+
+- **Installer relocated.** `install.sh` moved from the repository root to
+  `scripts/install.sh`, and the release bundle now ships it under `scripts/`, so
+  the install command is `./scripts/install.sh`.
+
 ## [1.1.1] - 2026-10-10
 
 ### Added

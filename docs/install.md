@@ -30,7 +30,7 @@ extract it, and run the installer:
 curl -LO https://github.com/brrrassica/omafanctrl/releases/latest/download/omafanctrl.zip
 unzip omafanctrl.zip
 cd omafanctrl-1.0.1
-./install.sh
+./scripts/install.sh
 ```
 
 The installer:
@@ -148,10 +148,29 @@ systemctl status omafanctrld
 omafanctrl status
 ```
 
-## Helper scripts
+## Lifecycle scripts
 
-The repository ships three operational scripts under [`scripts/`](../scripts/).
-They require root and a built release binary (`cargo build --release`).
+The repository ships the full program lifecycle under [`scripts/`](../scripts/).
+The installer and uninstaller re-exec themselves with `sudo`; the others are
+safe to run directly.
+
+| Script | Purpose |
+| --- | --- |
+| [`scripts/install.sh`](../scripts/install.sh) | Install every component and dependency (see [One-shot install](#one-shot-install-recommended)) |
+| [`scripts/uninstall.sh`](../scripts/uninstall.sh) | Stop the daemon, revert the fan, and remove the binaries and system files (`--purge` also removes `/etc/omafanctrl`) |
+| [`scripts/restart-all.sh`](../scripts/restart-all.sh) | Reload `ec_sys`, restart the daemon, and reload the omarchy-shell bar module |
+| [`scripts/doctor.sh`](../scripts/doctor.sh) | Read-only PASS/WARN/FAIL diagnostic of the platform, module, files, and daemon |
+
+```sh
+./scripts/install.sh
+./scripts/restart-all.sh
+sudo ./scripts/doctor.sh
+./scripts/uninstall.sh
+```
+
+## Developer scripts
+
+These require root and a built release binary (`cargo build --release`).
 
 | Script | Purpose |
 | --- | --- |

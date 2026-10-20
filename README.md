@@ -1,7 +1,7 @@
 # omafanctrl
 
-A modern fan-control suite for the **ThinkPad E14 Gen 4** on **Omarchy Quattro
-(4.x)**. It is a Linux counterpart to
+A modern fan-control suite for ThinkPads running **Omarchy Quattro (4.x)**. It
+is a Linux counterpart to
 [TPFanCtrl2](https://github.com/Shuzhengz/TPFanCtrl2): direct Embedded
 Controller (EC) access, BIOS/Manual/Smart modes, and `.ini` configuration, with
 a native GTK4 + libadwaita app, a scriptable CLI, and an omarchy-shell bar
@@ -17,10 +17,10 @@ in one step:
 curl -LO https://github.com/brrrassica/omafanctrl/releases/latest/download/omafanctrl.zip
 unzip omafanctrl.zip
 cd omafanctrl-1.1.1
-./install.sh
+./scripts/install.sh
 ```
 
-[`install.sh`](install.sh) re-execs itself with `sudo`, verifies the platform,
+[`scripts/install.sh`](scripts/install.sh) re-execs itself with `sudo`, verifies the platform,
 and refuses to run on anything other than Omarchy 4 on a ThinkPad.
 
 Other options: the AUR (`yay -S omafanctrl`) or a manual build — see
@@ -167,10 +167,10 @@ reverts the fan to BIOS auto control when the daemon stops or crashes. See
 
 ## Help wanted
 
-`omafanctrl` is developed and tested on a single machine: a **ThinkPad E14 Gen
-4** running **Omarchy Quattro (4.x)**. The EC register map, fan curve, and
-safety limits are verified against that one device, so behaviour on other
-ThinkPads is unproven.
+`omafanctrl` has so far been developed and tested on a single laptop running
+**Omarchy Quattro (4.x)**. The EC register map, fan curve, and safety limits
+are verified against that one device, so behaviour on other ThinkPads is
+unproven.
 
 If you have a different ThinkPad running Omarchy Quattro, your help would be
 invaluable:
@@ -203,7 +203,7 @@ on untested hardware until the register map has been confirmed for your model.
 ## Packaging
 
 - **Release bundle** — `omafanctrl.zip` (built by CI) contains the prebuilt
-  binaries, [`install.sh`](install.sh), and the system files.
+  binaries, the [`scripts/`](scripts/) lifecycle scripts, and the system files.
 - **AUR** — [`packaging/aur/omafanctrl/PKGBUILD`](packaging/aur/omafanctrl/PKGBUILD)
   (stable) and [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD) (`-git`).
 - **AppImage** — [`packaging/appimage/build.sh`](packaging/appimage/build.sh)

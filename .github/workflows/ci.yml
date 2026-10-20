@@ -83,15 +83,18 @@ jobs:
           install -Dm755 target/release/omafanctrl-gui    "$stage/bin/omafanctrl-gui"
           install -Dm755 target/release/omafanctrl-probe  "$stage/bin/omafanctrl-probe"
 
-          # Installer and payload.
-          install -Dm755 install.sh "$stage/install.sh"
+          # Lifecycle scripts and payload.
+          install -Dm755 scripts/install.sh     "$stage/scripts/install.sh"
+          install -Dm755 scripts/uninstall.sh   "$stage/scripts/uninstall.sh"
+          install -Dm755 scripts/restart-all.sh "$stage/scripts/restart-all.sh"
+          install -Dm755 scripts/doctor.sh      "$stage/scripts/doctor.sh"
           cp -a data "$stage/data"
           cp -a docs "$stage/docs"
           install -Dm644 README.md   "$stage/README.md"
           install -Dm644 CHANGELOG.md "$stage/CHANGELOG.md"
           install -Dm644 LICENSE     "$stage/LICENSE"
 
-          # Zip the bundle (install.sh + prebuilt binaries + data).
+          # Zip the bundle (scripts/ + prebuilt binaries + data).
           ( cd build && zip -r -q "../omafanctrl.zip" "omafanctrl-$version" )
 
       - name: Upload omafanctrl.zip
