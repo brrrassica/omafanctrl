@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/install.sh`, and the release bundle now ships it under `scripts/`, so
   the install command is `./scripts/install.sh`.
 
+## [1.1.2] - 2026-11-01
+
+### Fixed
+
+- **Manual mode honours `ManFanSpeed`.** Starting with `Active=3` now applies
+  the configured manual level instead of the safety floor, and reloading a
+  configuration updates the engine's manual level as well.
+
+[1.1.2]: https://github.com/omafanctrl/omafanctrl/releases/tag/v1.1.2
+
 ## [1.1.1] - 2026-10-10
 
 ### Added

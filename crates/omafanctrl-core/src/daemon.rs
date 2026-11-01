@@ -68,6 +68,9 @@ impl<B: EcBackend> Daemon<B> {
         // (0 = BIOS, 1/2 = Smart, 3 = Manual). The default configuration uses
         // Smart, so a fresh install boots into smart control rather than BIOS.
         engine.set_mode(Mode::from_active(config.general.active));
+        // Apply the configured manual level so a configuration that starts in
+        // Manual mode commands `ManFanSpeed` rather than the safety floor.
+        engine.set_manual_level(config.general.man_fan_speed);
         let watcher = ConfigWatcher::new(config_path.clone());
         let (state_tx, _state_rx) = watch::channel(State::default());
         let (config_tx, _config_rx) = watch::channel(config.to_ini());
@@ -252,6 +255,9 @@ impl<B: EcBackend> Daemon<B> {
     /// Adopt a new configuration and reset the engine so it takes effect.
     fn apply_config(&mut self, config: Config) {
         self.engine.set_policy(EnginePolicy::from_config(&config));
+        // Keep the engine's manual level in sync with the reloaded file; the
+        // setter clamps to the safety floor/ceiling.
+        self.engine.set_manual_level(config.general.man_fan_speed);
         self.engine.reset();
         let ini = config.to_ini();
         self.config = config;
@@ -430,6 +436,52 @@ mod tests {
                 .iter()
                 .any(|sensor| sensor.name == "cpu" && sensor.celsius == 60)
         );
+    }
+
+    #[test]
+    fn daemon_applies_configured_manual_level_at_startup() {
+        let (backend, bytes) = SharedBackend::new();
+        let config: Config = "Active=3\nManFanSpeed=5\nLevel=50 2 0 0\nLevel=60 3 0 0\n"
+            .parse()
+            .unwrap();
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+
+        assert_eq!(daemon.engine().mode(), Mode::Manual);
+        assert_eq!(daemon.engine().manual_level(), 5);
+
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(control_register(&bytes), 5);
+    }
+
+    #[test]
+    fn daemon_applies_manual_level_when_config_is_reloaded() {
+        let path = temp_path("manual-reload");
+        std::fs::write(&path, "Level=50 2 0 0\nLevel=60 3 0 0\n").unwrap();
+        let (backend, bytes) = SharedBackend::new();
+        let config = Config::from_file(&path).unwrap();
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+
+        // Start in Manual mode with the default level (the safety floor).
+        daemon
+            .handle_command(Command::SetMode(Mode::Manual))
+            .unwrap();
+        assert_eq!(control_register(&bytes), 1);
+
+        // Reload a configuration that raises the manual level.
+        std::fs::write(
+            &path,
+            "Active=3\nManFanSpeed=5\nLevel=50 2 0 0\nLevel=60 3 0 0\n",
+        )
+        .unwrap();
+        daemon.handle_command(Command::ReloadConfig).unwrap();
+        assert_eq!(daemon.engine().manual_level(), 5);
+        assert_eq!(control_register(&bytes), 5);
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
