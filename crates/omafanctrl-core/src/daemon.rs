@@ -181,10 +181,15 @@ impl<B: EcBackend> Daemon<B> {
             Command::SetMode(mode) => self.engine.set_mode(mode),
             Command::SetManualLevel(level) => self.engine.set_manual_level(level),
             Command::SetHysteresis(enabled) => self.engine.set_hysteresis_enabled(enabled),
-            Command::ReloadConfig => {
-                let config = Config::from_file(&self.config_path).map_err(EngineError::Config)?;
-                self.apply_config(config);
-            }
+            Command::ReloadConfig => match Config::from_file(&self.config_path) {
+                Ok(config) => self.apply_config(config),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "ignoring configuration reload error; keeping the last good configuration"
+                    );
+                }
+            },
         }
         // An explicit command should take effect immediately, bypassing the
         // anti-oscillation dwell timer.
@@ -557,6 +562,30 @@ mod tests {
         std::fs::write(&path, "Level=50 2 0 0\nLevel=60 2 0 0\n").unwrap();
         daemon.handle_command(Command::ReloadConfig).unwrap();
         assert_eq!(control_register(&bytes), 2);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn daemon_keeps_last_good_config_when_reload_fails() {
+        let path = temp_path("invalid-reload");
+        std::fs::write(&path, "Level=50 2 0 0\nLevel=60 3 0 0\n").unwrap();
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        let config = Config::from_file(&path).unwrap();
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+
+        daemon
+            .handle_command(Command::SetMode(Mode::Smart))
+            .unwrap();
+        assert_eq!(control_register(&bytes), 3);
+
+        // An unparseable file must not stop the loop or discard the last good
+        // configuration.
+        std::fs::write(&path, "not a valid configuration\n").unwrap();
+        daemon.handle_command(Command::ReloadConfig).unwrap();
+        assert_eq!(daemon.engine().mode(), Mode::Smart);
+        assert_eq!(control_register(&bytes), 3);
 
         std::fs::remove_file(&path).ok();
     }

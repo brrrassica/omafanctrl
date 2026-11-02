@@ -93,18 +93,26 @@ async fn main() -> Result<()> {
     // Run the control loop. Dropping the daemon (when this task ends) reverts
     // the fan to BIOS auto control.
     let interval = Duration::from_secs(args.interval.max(1));
-    let loop_task = tokio::spawn(async move {
-        if let Err(error) = daemon.run(interval, shutdown_rx).await {
-            tracing::error!(%error, "control loop stopped");
+    let mut loop_task = tokio::spawn(async move { daemon.run(interval, shutdown_rx).await });
+
+    tokio::select! {
+        _ = shutdown_signal() => {
+            tracing::info!("shutting down");
+            let _ = shutdown_tx.send(true);
         }
-    });
+        result = &mut loop_task => {
+            // The loop ended without a shutdown request. Surface the error so
+            // the process exits non-zero and systemd's `Restart=on-failure`
+            // can restart the daemon instead of leaving it answering D-Bus
+            // with stale data.
+            result.context("control loop task failed")??;
+            anyhow::bail!("control loop stopped unexpectedly");
+        }
+    }
 
-    shutdown_signal().await;
-    tracing::info!("shutting down");
-    let _ = shutdown_tx.send(true);
-
-    let _ = loop_task.await;
+    let result = loop_task.await.context("control loop task failed")?;
     signal_task.abort();
+    result?;
     Ok(())
 }
 
