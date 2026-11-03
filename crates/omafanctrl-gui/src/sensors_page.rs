@@ -61,7 +61,11 @@ impl SensorsPage {
             return;
         }
         *self.known.borrow_mut() = sensors.clone();
+        self.rebuild_rows(&sensors);
+    }
 
+    /// Rebuild the rows for the given sensors.
+    fn rebuild_rows(&self, sensors: &[(String, u8)]) {
         for row in self.rows.borrow_mut().drain(..) {
             self.group.remove(&row);
         }
@@ -69,17 +73,17 @@ impl SensorsPage {
         for (name, offset) in sensors {
             let ignored = config
                 .as_ref()
-                .is_some_and(|config| config.sensors.ignore.iter().any(|entry| entry == &name));
+                .is_some_and(|config| config.sensors.ignore.iter().any(|entry| entry == name));
 
             let row = adw::EntryRow::builder()
-                .title(sensor_display_name(offset))
+                .title(sensor_display_name(*offset))
                 .build();
             if let Some(config) = &config {
                 if let Some((_, display)) = config
                     .sensors
                     .names
                     .iter()
-                    .find(|(_, display)| display.as_str() == name)
+                    .find(|(_, display)| display.as_str() == name.as_str())
                 {
                     row.set_text(display);
                 }
@@ -133,6 +137,14 @@ impl SensorsPage {
         }
     }
 
-    /// Apply a configuration (unused).
-    pub fn apply_config(&self, _config: &Config) {}
+    /// Rebuild the rows when the configuration changes, so the switches reflect
+    /// the current `IgnoreSensors` and `SensorName` values even when the sensor
+    /// set has not changed (including the initial State-before-Config update).
+    pub fn apply_config(&self, _config: &Config) {
+        let sensors = self.known.borrow().clone();
+        if sensors.is_empty() {
+            return;
+        }
+        self.rebuild_rows(&sensors);
+    }
 }
