@@ -199,13 +199,18 @@ impl<B: EcBackend> Daemon<B> {
 
     /// Run the control loop until `shutdown` is signalled or the command channel
     /// closes.
+    ///
+    /// `interval` overrides the control-loop cadence. When `None`, the cadence
+    /// comes from `[General] Cycle` in the live configuration and is re-read
+    /// after every control tick, so a configuration reload takes effect without
+    /// restarting the daemon.
     pub async fn run(
         &mut self,
-        interval: Duration,
+        interval: Option<Duration>,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), EngineError> {
         // Sample and publish at the fast telemetry cadence; evaluate the fan
-        // control decision only once per `interval`.
+        // control decision only once per control interval.
         let mut ticker = tokio::time::interval(self.telemetry_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_control: Option<Instant> = None;
@@ -223,8 +228,9 @@ impl<B: EcBackend> Daemon<B> {
             match received {
                 None => {
                     let now = Instant::now();
+                    let control_interval = self.control_interval(interval);
                     let control_due = last_control
-                        .is_none_or(|last| now.saturating_duration_since(last) >= interval);
+                        .is_none_or(|last| now.saturating_duration_since(last) >= control_interval);
                     if control_due {
                         self.tick(now)?;
                         last_control = Some(now);
@@ -240,6 +246,15 @@ impl<B: EcBackend> Daemon<B> {
             }
         }
         Ok(())
+    }
+
+    /// Resolve the control-loop cadence.
+    ///
+    /// A CLI override wins; otherwise the current `[General] Cycle` is used
+    /// (clamped to at least one second, matching config validation).
+    fn control_interval(&self, override_interval: Option<Duration>) -> Duration {
+        override_interval
+            .unwrap_or_else(|| Duration::from_secs(u64::from(self.config.general.cycle.max(1))))
     }
 
     /// Reload the configuration if the file changed, keeping the last good
@@ -647,5 +662,23 @@ mod tests {
         )
         .with_telemetry_interval(Duration::from_secs(2));
         assert_eq!(daemon.telemetry_interval, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn control_interval_uses_config_cycle_unless_overridden() {
+        let (backend, _bytes) = SharedBackend::new();
+        let mut config = smart_config();
+        config.general.cycle = 17;
+        let daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+
+        assert_eq!(daemon.control_interval(None), Duration::from_secs(17));
+        assert_eq!(
+            daemon.control_interval(Some(Duration::from_secs(2))),
+            Duration::from_secs(2)
+        );
     }
 }

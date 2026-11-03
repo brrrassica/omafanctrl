@@ -9,10 +9,10 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use omafanctrl_core::config::Config;
-use omafanctrl_core::dbus::State;
+use omafanctrl_core::dbus::{SensorState, State};
 use omafanctrl_core::engine::sensor_display_name;
 
-use crate::state::AppState;
+use crate::state::{AppState, sensor_is_ignored, set_sensor_ignored};
 
 /// The Sensors page.
 pub struct SensorsPage {
@@ -71,9 +71,12 @@ impl SensorsPage {
         }
         let config = self.state.config.borrow().clone();
         for (name, offset) in sensors {
-            let ignored = config
-                .as_ref()
-                .is_some_and(|config| config.sensors.ignore.iter().any(|entry| entry == name));
+            let sensor = SensorState {
+                name: name.clone(),
+                offset: *offset,
+                celsius: 0,
+            };
+            let ignored = sensor_is_ignored(config.as_ref(), &sensor);
 
             let row = adw::EntryRow::builder()
                 .title(sensor_display_name(*offset))
@@ -97,18 +100,13 @@ impl SensorsPage {
             row.add_suffix(&switch);
 
             let state_for_switch = self.state.clone();
-            let name_for_switch = name.clone();
+            let sensor_for_switch = sensor.clone();
             switch.connect_active_notify(move |switch| {
                 let config = state_for_switch.config.borrow().clone();
                 if let Some(mut config) = config {
-                    if switch.is_active() {
-                        config
-                            .sensors
-                            .ignore
-                            .retain(|entry| entry != &name_for_switch);
-                    } else if !config.sensors.ignore.contains(&name_for_switch) {
-                        config.sensors.ignore.push(name_for_switch.clone());
-                    }
+                    // An active switch means "enabled", i.e. not ignored. This
+                    // removes both the name and `x<hex>` offset entries.
+                    set_sensor_ignored(&mut config, &sensor_for_switch, !switch.is_active());
                     state_for_switch.set_config(&config);
                 }
             });

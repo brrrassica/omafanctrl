@@ -154,8 +154,9 @@ sudo systemctl enable --now omafanctrld
 ```
 
 The daemon is the only component that writes to the EC, so it runs as root. Run
-it directly with `sudo omafanctrld --config <path>`; `--interval <secs>` sets
-the control-loop cadence and `--revert` hands the fan back to BIOS auto and
+it directly with `sudo omafanctrld --config <path>`; the control-loop cadence
+comes from `[General] Cycle` and is re-read on reload, while
+`--interval <secs>` overrides it. `--revert` hands the fan back to BIOS auto and
 exits. See [docs/install.md](docs/install.md) for the full manual and AppImage
 paths.
 

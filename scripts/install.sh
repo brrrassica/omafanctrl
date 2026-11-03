@@ -308,8 +308,13 @@ info "Reloading D-Bus and systemd"
 systemctl reload dbus 2>/dev/null || systemctl restart dbus 2>/dev/null || true
 systemctl daemon-reload
 
-info "Enabling and starting the omafanctrld service"
-systemctl enable --now omafanctrld \
+info "Enabling and (re)starting the omafanctrld service"
+# `enable --now` only starts a stopped unit, so on an upgrade it would leave the
+# previously running daemon (and its old binary) in place. Restart explicitly:
+# `restart` also starts a stopped service, covering fresh installs.
+systemctl enable omafanctrld \
+  || warn "omafanctrld failed to enable; check: systemctl status omafanctrld"
+systemctl restart omafanctrld \
   || warn "omafanctrld failed to start; check: journalctl -u omafanctrld -e"
 
 # ---------------------------------------------------------------------------

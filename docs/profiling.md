@@ -64,8 +64,9 @@ sudo omafanctrld --telemetry-interval-ms 1000
 | 250 ms (default) | 4 Hz | Balanced |
 | 1000 ms | 1 Hz | Lowest idle cost, coarser history |
 
-The interval is clamped to at least 1 ms. The control cadence is independent and
-is set with `--interval <secs>`.
+The interval is clamped to at least 1 ms. The control cadence is independent: it
+comes from `[General] Cycle` (in seconds), which the daemon re-reads after each
+control tick, and `--interval <secs>` overrides it when set.
 
 ## Reducing wakeups further
 
