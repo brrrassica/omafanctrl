@@ -24,6 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/install.sh`, and the release bundle now ships it under `scripts/`, so
   the install command is `./scripts/install.sh`.
 
+### Fixed
+
+- **Polkit authorization is enforced.** Every mutating D-Bus method
+  (`SetMode`, `SetManualLevel`, `SetHysteresis`, `SetConfig`, `ReloadConfig`)
+  now calls `CheckAuthorization` for `org.omarchy.omafanctrl.control` and
+  returns `AccessDenied` when the caller is not authorized.
+- **Sensors page reflects the configuration.** Switch states and display names
+  are rebuilt when the configuration arrives or changes, instead of being
+  frozen from the initial State-before-Config update.
+- **Failed explicit reloads keep fan control running.** An unreadable or
+  invalid configuration no longer terminates the control loop; the last good
+  configuration is kept, and a genuinely fatal loop error now exits the daemon
+  non-zero so systemd can restart it.
+
 ## [1.1.2] - 2026-11-01
 
 ### Fixed

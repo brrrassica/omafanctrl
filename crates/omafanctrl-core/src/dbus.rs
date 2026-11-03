@@ -19,7 +19,11 @@
 //! command channel to the control loop. [`Control`] is a thin zbus wrapper, so
 //! the service can be unit-tested without a bus.
 
+use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 
@@ -28,6 +32,116 @@ use crate::engine::Mode;
 
 /// The well-known D-Bus name owned by the daemon.
 pub const BUS_NAME: &str = "org.omarchy.omafanctrl";
+
+/// The polkit action required to perform mutating requests.
+pub const POLKIT_ACTION: &str = "org.omarchy.omafanctrl.control";
+
+/// A boxed authorization future, keeping [`PolkitClient`] dyn-compatible.
+type AuthorizationFuture<'a> = Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+
+/// Checks whether a caller may perform mutating requests.
+///
+/// The D-Bus layer only mutates state after [`PolkitClient::check`] returns
+/// `true`. The trait is injectable so tests can exercise the denial path
+/// without a live polkit authority.
+pub trait PolkitClient: std::fmt::Debug + Send + Sync {
+    /// Return `true` when `sender` (a D-Bus unique name) is authorized.
+    fn check<'a>(&'a self, sender: &'a str) -> AuthorizationFuture<'a>;
+}
+
+/// The production [`PolkitClient`], backed by the system polkit authority.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemPolkit;
+
+impl PolkitClient for SystemPolkit {
+    fn check<'a>(&'a self, sender: &'a str) -> AuthorizationFuture<'a> {
+        Box::pin(async move {
+            match check_polkit_authorization(sender).await {
+                Ok(authorized) => {
+                    if !authorized {
+                        tracing::warn!(
+                            sender,
+                            action = POLKIT_ACTION,
+                            "polkit denied the fan-control request"
+                        );
+                    }
+                    authorized
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        sender,
+                        action = POLKIT_ACTION,
+                        "polkit authorization check failed; denying the request"
+                    );
+                    false
+                }
+            }
+        })
+    }
+}
+
+/// The argument body of polkit's `CheckAuthorization`.
+///
+/// Signature: `((sa{sv})sa{ss}us)` — subject, action, details, flags, and
+/// cancellation id.
+type AuthorizationBody<'a> = (
+    (&'a str, HashMap<&'a str, zbus::zvariant::Value<'a>>),
+    &'a str,
+    HashMap<&'a str, &'a str>,
+    u32,
+    &'a str,
+);
+
+/// Build the `CheckAuthorization` body for a caller's unique bus name.
+fn authorization_body(sender: &str) -> AuthorizationBody<'_> {
+    let mut subject_details: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+    subject_details.insert("name", zbus::zvariant::Value::from(sender));
+
+    // `AllowUserInteraction` (1) lets polkit show an authentication prompt.
+    const ALLOW_USER_INTERACTION: u32 = 1;
+
+    (
+        ("system-bus-name", subject_details),
+        POLKIT_ACTION,
+        HashMap::new(),
+        ALLOW_USER_INTERACTION,
+        "",
+    )
+}
+
+/// Ask the polkit authority whether `sender` may perform [`POLKIT_ACTION`].
+async fn check_polkit_authorization(sender: &str) -> zbus::Result<bool> {
+    let connection = zbus::Connection::system().await?;
+    let proxy = zbus::Proxy::new(
+        &connection,
+        "org.freedesktop.PolicyKit1",
+        "/org/freedesktop/PolicyKit1/Authority",
+        "org.freedesktop.PolicyKit1.Authority",
+    )
+    .await?;
+
+    let (authorized, _is_challenge, _details): (bool, bool, HashMap<String, String>) = proxy
+        .call("CheckAuthorization", &authorization_body(sender))
+        .await?;
+    Ok(authorized)
+}
+
+/// Enforce a [`PolkitClient`] decision, returning `AccessDenied` on refusal.
+async fn authorize(client: &dyn PolkitClient, sender: Option<&str>) -> zbus::fdo::Result<()> {
+    let Some(sender) = sender else {
+        return Err(zbus::fdo::Error::AccessDenied(
+            "the caller has no unique D-Bus name".to_string(),
+        ));
+    };
+    if client.check(sender).await {
+        Ok(())
+    } else {
+        Err(zbus::fdo::Error::AccessDenied(
+            "authentication is required to control the fan".to_string(),
+        ))
+    }
+}
 
 /// The object path the control interface is served at.
 pub const OBJECT_PATH: &str = "/org/omarchy/omafanctrl";
@@ -223,17 +337,37 @@ impl ControlService {
 #[derive(Debug, Clone)]
 pub struct Control {
     service: ControlService,
+    authorizer: Arc<dyn PolkitClient>,
 }
 
 impl Control {
     /// Wrap a [`ControlService`] in the D-Bus interface.
+    ///
+    /// Mutating methods are gated by the system polkit authority.
     pub fn new(service: ControlService) -> Self {
-        Self { service }
+        Self::with_authorizer(service, Arc::new(SystemPolkit))
+    }
+
+    /// Wrap a [`ControlService`] with a custom authorizer.
+    pub fn with_authorizer(service: ControlService, authorizer: Arc<dyn PolkitClient>) -> Self {
+        Self {
+            service,
+            authorizer,
+        }
     }
 
     /// The underlying service.
     pub fn service(&self) -> &ControlService {
         &self.service
+    }
+
+    /// Verify that the caller may perform a mutating request.
+    async fn authorize(&self, header: &zbus::message::Header<'_>) -> zbus::fdo::Result<()> {
+        authorize(
+            self.authorizer.as_ref(),
+            header.sender().map(|name| name.as_str()),
+        )
+        .await
     }
 }
 
@@ -245,17 +379,32 @@ impl Control {
     }
 
     /// Switch the active mode (`bios`, `manual`, or `smart`).
-    async fn set_mode(&self, mode: String) -> zbus::fdo::Result<()> {
+    async fn set_mode(
+        &self,
+        mode: String,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        self.authorize(&header).await?;
         self.service.set_mode(&mode).map_err(to_fdo)
     }
 
     /// Set the manual fan level.
-    async fn set_manual_level(&self, level: u8) -> zbus::fdo::Result<()> {
+    async fn set_manual_level(
+        &self,
+        level: u8,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        self.authorize(&header).await?;
         self.service.set_manual_level(level).map_err(to_fdo)
     }
 
     /// Enable or disable smart-mode hysteresis.
-    async fn set_hysteresis(&self, enabled: bool) -> zbus::fdo::Result<()> {
+    async fn set_hysteresis(
+        &self,
+        enabled: bool,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        self.authorize(&header).await?;
         self.service.set_hysteresis(enabled).map_err(to_fdo)
     }
 
@@ -265,12 +414,21 @@ impl Control {
     }
 
     /// Validate, persist, and apply new configuration text.
-    async fn set_config(&self, contents: String) -> zbus::fdo::Result<()> {
+    async fn set_config(
+        &self,
+        contents: String,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        self.authorize(&header).await?;
         self.service.set_config(&contents).map_err(to_fdo)
     }
 
     /// Re-read the configuration file from disk.
-    async fn reload_config(&self) -> zbus::fdo::Result<()> {
+    async fn reload_config(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        self.authorize(&header).await?;
         self.service.reload_config().map_err(to_fdo)
     }
 
@@ -400,6 +558,48 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("Active=1"));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn polkit_request_body_matches_the_check_authorization_signature() {
+        use zbus::zvariant::DynamicType;
+
+        assert_eq!(
+            authorization_body(":1.42").signature().to_string(),
+            "((sa{sv})sa{ss}us)"
+        );
+    }
+
+    #[derive(Debug)]
+    struct MockPolkit(bool);
+
+    impl PolkitClient for MockPolkit {
+        fn check<'a>(&'a self, _sender: &'a str) -> AuthorizationFuture<'a> {
+            Box::pin(async move { self.0 })
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_allows_an_approved_caller() {
+        authorize(&MockPolkit(true), Some(":1.42"))
+            .await
+            .expect("an approved caller should be authorized");
+    }
+
+    #[tokio::test]
+    async fn authorization_denies_a_refused_caller() {
+        let error = authorize(&MockPolkit(false), Some(":1.42"))
+            .await
+            .expect_err("a refused caller must be denied");
+        assert!(matches!(error, zbus::fdo::Error::AccessDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn authorization_denies_a_caller_without_an_identity() {
+        let error = authorize(&MockPolkit(true), None)
+            .await
+            .expect_err("a caller without a unique name must be denied");
+        assert!(matches!(error, zbus::fdo::Error::AccessDenied(_)));
     }
 
     #[test]
