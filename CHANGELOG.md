@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Cycle` is honored.** The daemon now uses `[General] Cycle` as its
+  control-loop cadence and re-reads it on configuration reload; `--interval`
+  overrides it when given.
+- **Sensors page honors hex-offset `IgnoreSensors` entries.** Ignore matching
+  now uses the engine's name-or-`x<hex>` semantics, and re-enabling a sensor
+  removes both forms, so a sensor ignored by offset can be enabled again.
+- **Re-running the installer restarts an active daemon.** The installer now
+  runs `systemctl restart omafanctrld` after installing the new binaries, so an
+  upgrade replaces the running process instead of leaving the old binary alive.
+
 ## [1.1.3] - 2026-11-03
 
 ### Added

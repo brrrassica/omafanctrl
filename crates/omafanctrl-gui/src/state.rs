@@ -50,6 +50,16 @@ pub fn mode_name(index: u32) -> &'static str {
     }
 }
 
+/// Whether an `IgnoreSensors` entry refers to the given sensor.
+///
+/// Entries may be sensor names (e.g. `pwr`) or hex register offsets
+/// (e.g. `x7d`), matching the engine's ignore semantics: comparison is
+/// case-insensitive and ignores surrounding whitespace.
+fn ignore_entry_matches(entry: &str, sensor: &SensorState) -> bool {
+    let entry = entry.trim().to_ascii_lowercase();
+    entry == sensor.name.to_ascii_lowercase() || entry == format!("x{:02x}", sensor.offset)
+}
+
 /// Whether a sensor is excluded by the configuration's `IgnoreSensors` list.
 ///
 /// Entries may be sensor names (e.g. `pwr`) or hex register offsets
@@ -58,12 +68,28 @@ pub fn sensor_is_ignored(config: Option<&Config>, sensor: &SensorState) -> bool 
     let Some(config) = config else {
         return false;
     };
-    let name = sensor.name.to_ascii_lowercase();
-    let offset_key = format!("x{:02x}", sensor.offset);
-    config.sensors.ignore.iter().any(|entry| {
-        let entry = entry.trim().to_ascii_lowercase();
-        entry == name || entry == offset_key
-    })
+    config
+        .sensors
+        .ignore
+        .iter()
+        .any(|entry| ignore_entry_matches(entry, sensor))
+}
+
+/// Enable or disable a sensor in the configuration's `IgnoreSensors` list.
+///
+/// Enabling removes *every* matching entry, including the `x<hex>` offset form,
+/// so a sensor ignored by offset can actually be re-enabled.
+pub fn set_sensor_ignored(config: &mut Config, sensor: &SensorState, ignored: bool) {
+    if ignored {
+        if !sensor_is_ignored(Some(config), sensor) {
+            config.sensors.ignore.push(sensor.name.clone());
+        }
+    } else {
+        config
+            .sensors
+            .ignore
+            .retain(|entry| !ignore_entry_matches(entry, sensor));
+    }
 }
 
 /// The temperature of the named sensor, if present.
@@ -105,5 +131,40 @@ mod tests {
         assert!(!sensor_is_ignored(Some(&config), &sensor("cpu", 0x78)));
         // Without a loaded config nothing is hidden.
         assert!(!sensor_is_ignored(None, &sensor("pwr", 0xC0)));
+    }
+
+    #[test]
+    fn enabling_a_sensor_removes_name_and_offset_entries() {
+        let mut config: Config = "IgnoreSensors=pwr,x7d\n".parse().unwrap();
+
+        // Disabled by offset only.
+        let offset_ignored = SensorState {
+            name: "no5".to_string(),
+            offset: 0x7D,
+            celsius: 40,
+        };
+        assert!(sensor_is_ignored(Some(&config), &offset_ignored));
+        set_sensor_ignored(&mut config, &offset_ignored, false);
+        assert!(!sensor_is_ignored(Some(&config), &offset_ignored));
+        assert!(config.sensors.ignore.iter().all(|e| e != "x7d"));
+
+        // Disabled by name only.
+        let name_ignored = SensorState {
+            name: "pwr".to_string(),
+            offset: 0xC0,
+            celsius: 40,
+        };
+        assert!(sensor_is_ignored(Some(&config), &name_ignored));
+        set_sensor_ignored(&mut config, &name_ignored, false);
+        assert!(!sensor_is_ignored(Some(&config), &name_ignored));
+
+        // Re-disabling adds the name back exactly once.
+        set_sensor_ignored(&mut config, &name_ignored, true);
+        set_sensor_ignored(&mut config, &name_ignored, true);
+        assert!(sensor_is_ignored(Some(&config), &name_ignored));
+        assert_eq!(
+            config.sensors.ignore.iter().filter(|e| *e == "pwr").count(),
+            1
+        );
     }
 }

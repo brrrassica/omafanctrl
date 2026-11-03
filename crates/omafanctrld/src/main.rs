@@ -23,9 +23,6 @@ use tracing_subscriber::EnvFilter;
 /// The default configuration path.
 const DEFAULT_CONFIG_PATH: &str = "/etc/omafanctrl/TPFanControl.ini";
 
-/// The default control-loop interval, in seconds.
-const DEFAULT_INTERVAL_SECS: u64 = 5;
-
 /// The default telemetry sampling interval, in milliseconds.
 ///
 /// Telemetry drives the GUI temperature history independently of the
@@ -41,8 +38,11 @@ struct Args {
     config: PathBuf,
 
     /// Control-loop interval, in seconds.
-    #[arg(long, default_value_t = DEFAULT_INTERVAL_SECS)]
-    interval: u64,
+    ///
+    /// Overrides the `[General] Cycle` setting. When omitted, the daemon uses
+    /// `Cycle` from the configuration file and picks up changes on reload.
+    #[arg(long)]
+    interval: Option<u64>,
 
     /// Telemetry sampling interval, in milliseconds.
     ///
@@ -92,7 +92,11 @@ async fn main() -> Result<()> {
 
     // Run the control loop. Dropping the daemon (when this task ends) reverts
     // the fan to BIOS auto control.
-    let interval = Duration::from_secs(args.interval.max(1));
+    // `None` means "use `[General] Cycle`", re-read from the live config by the
+    // control loop on every iteration so config reloads take effect.
+    let interval = args
+        .interval
+        .map(|seconds| Duration::from_secs(seconds.max(1)));
     let mut loop_task = tokio::spawn(async move { daemon.run(interval, shutdown_rx).await });
 
     tokio::select! {
