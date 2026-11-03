@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-11-03
+
 ### Added
 
 - **Lifecycle scripts.** The installer now lives at
@@ -37,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid configuration no longer terminates the control loop; the last good
   configuration is kept, and a genuinely fatal loop error now exits the daemon
   non-zero so systemd can restart it.
+
+[1.1.3]: https://github.com/omafanctrl/omafanctrl/releases/tag/v1.1.3
 
 ## [1.1.2] - 2026-11-01
 
