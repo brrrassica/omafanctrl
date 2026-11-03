@@ -58,6 +58,13 @@ pub struct Daemon<B: EcBackend> {
     commands: mpsc::Receiver<Command>,
     config_path: PathBuf,
     telemetry_interval: Duration,
+    /// Consecutive control/sample iterations with at least one failed EC read.
+    read_errors: u32,
+    /// The last successfully read sensor bank, used to fill in sensors whose
+    /// read failed on the current iteration.
+    last_readings: Vec<SensorReading>,
+    /// The last successfully read fan speed.
+    last_fan_rpm: u16,
 }
 
 impl<B: EcBackend> Daemon<B> {
@@ -87,6 +94,9 @@ impl<B: EcBackend> Daemon<B> {
             commands,
             config_path,
             telemetry_interval: TELEMETRY_INTERVAL,
+            read_errors: 0,
+            last_readings: Vec::new(),
+            last_fan_rpm: 0,
         }
     }
 
@@ -137,16 +147,85 @@ impl<B: EcBackend> Daemon<B> {
     }
 
     /// Read the sensor bank and the fan speed.
-    fn read_sensors(&mut self) -> Result<(Vec<SensorReading>, u16), EngineError> {
-        let readings = read_sensor_readings(self.watchdog.ec_mut(), &self.sensor_offsets)?;
-        let fan_rpm = self.watchdog.ec_mut().read_fan_rpm()?;
-        Ok((readings, fan_rpm))
+    ///
+    /// A failed sensor offset is skipped and filled from the last successful
+    /// sample, so a single bad sensor does not fail the batch. A failed
+    /// tachometer read keeps the last known RPM. `true` is returned when the
+    /// whole iteration failed (no sensor could be read, or the tachometer read
+    /// failed), so the control path can retain its last decision instead of
+    /// acting on stale data. After [`General::max_read_errors`] consecutive
+    /// failed iterations an error is returned so the daemon exits and the
+    /// watchdog reverts the fan.
+    ///
+    /// [`General::max_read_errors`]: crate::config::General::max_read_errors
+    fn read_sensors(&mut self) -> Result<(Vec<SensorReading>, u16, bool), EngineError> {
+        let mut last_error = None;
+        let (readings, sensors_failed) =
+            match read_sensor_readings(self.watchdog.ec_mut(), &self.sensor_offsets) {
+                Ok(readings) => (readings, false),
+                Err(error) => {
+                    last_error = Some(error);
+                    (Vec::new(), true)
+                }
+            };
+        let (fan_rpm, fan_failed) = match self.watchdog.ec_mut().read_fan_rpm() {
+            Ok(fan_rpm) => (fan_rpm, false),
+            Err(error) => {
+                last_error.get_or_insert(error);
+                (self.last_fan_rpm, true)
+            }
+        };
+
+        let readings = if readings.len() == self.sensor_offsets.len() {
+            readings
+        } else {
+            self.merge_last_readings(readings)
+        };
+
+        if sensors_failed || fan_failed {
+            self.read_errors = self.read_errors.saturating_add(1);
+            if self.read_errors > self.config.general.max_read_errors {
+                let error = last_error.expect("a failed read iteration must carry an EC error");
+                return Err(error.into());
+            }
+        } else {
+            self.read_errors = 0;
+        }
+
+        self.last_readings = readings.clone();
+        self.last_fan_rpm = fan_rpm;
+        Ok((readings, fan_rpm, sensors_failed || fan_failed))
+    }
+
+    /// Fill sensors missing from `readings` with their last successful value.
+    fn merge_last_readings(&self, readings: Vec<SensorReading>) -> Vec<SensorReading> {
+        self.sensor_offsets
+            .iter()
+            .filter_map(|&offset| {
+                readings
+                    .iter()
+                    .find(|reading| reading.offset == offset)
+                    .cloned()
+                    .or_else(|| {
+                        self.last_readings
+                            .iter()
+                            .find(|reading| reading.offset == offset)
+                            .cloned()
+                    })
+            })
+            .collect()
     }
 
     /// Run one control iteration.
     pub fn tick(&mut self, now: Instant) -> Result<(), EngineError> {
         self.poll_config();
-        let (readings, fan_rpm) = self.read_sensors()?;
+        let (readings, fan_rpm, read_failed) = self.read_sensors()?;
+        if read_failed {
+            // Keep the last commanded level and publish the retained snapshot
+            // rather than acting on partial or stale sensor data.
+            self.publish_state(&readings, fan_rpm);
+            return Ok(());
+        }
         let decision = self.engine.decide(&readings, now);
         match apply_decision(self.watchdog.ec_mut(), decision) {
             Ok(()) => self.engine.commit(decision, now),
@@ -170,7 +249,7 @@ impl<B: EcBackend> Daemon<B> {
     /// This drives the fast telemetry cadence so the GUI's temperature history
     /// stays fresh between control iterations, without touching the fan.
     pub fn sample(&mut self) -> Result<(), EngineError> {
-        let (readings, fan_rpm) = self.read_sensors()?;
+        let (readings, fan_rpm, _) = self.read_sensors()?;
         self.publish_state(&readings, fan_rpm);
         Ok(())
     }
@@ -180,7 +259,12 @@ impl<B: EcBackend> Daemon<B> {
         match command {
             Command::SetMode(mode) => self.engine.set_mode(mode),
             Command::SetManualLevel(level) => self.engine.set_manual_level(level),
-            Command::SetHysteresis(enabled) => self.engine.set_hysteresis_enabled(enabled),
+            Command::SetHysteresis(enabled) => {
+                self.config.general.hysteresis = enabled;
+                self.engine.set_hysteresis_enabled(enabled);
+                self.persist_config();
+                let _ = self.config_tx.send(self.config.to_ini());
+            }
             Command::ReloadConfig => match Config::from_file(&self.config_path) {
                 Ok(config) => self.apply_config(config),
                 Err(error) => {
@@ -284,6 +368,21 @@ impl<B: EcBackend> Daemon<B> {
         let _ = self.config_tx.send(ini);
     }
 
+    /// Write the live configuration back to the configured path.
+    ///
+    /// Used by runtime settings such as `SetHysteresis`, whose values are
+    /// documented as persisted in `[General]`. A write failure is logged rather
+    /// than aborting the control loop; the live setting still applies.
+    fn persist_config(&self) {
+        if let Err(error) = std::fs::write(&self.config_path, self.config.to_ini()) {
+            tracing::warn!(
+                %error,
+                path = %self.config_path.display(),
+                "failed to persist configuration; the live setting still applies"
+            );
+        }
+    }
+
     /// Publish a state snapshot for the D-Bus layer.
     fn publish_state(&self, readings: &[SensorReading], fan_rpm: u16) {
         let state = State {
@@ -365,8 +464,61 @@ mod tests {
 
     /// Build an EC with the write rate limit disabled, so tests can issue
     /// several commands in quick succession.
-    fn ec(backend: SharedBackend) -> Ec<SharedBackend> {
+    fn ec<B: EcBackend>(backend: B) -> Ec<B> {
         Ec::new(backend).with_min_write_interval(Duration::ZERO)
+    }
+
+    /// A backend that can inject read failures for selected offsets or for
+    /// every read, leaving writes untouched.
+    #[derive(Clone)]
+    struct FlakyBackend {
+        inner: SharedBackend,
+        failing_offsets: Arc<Mutex<Vec<usize>>>,
+        fail_all: Arc<AtomicU32>,
+    }
+
+    impl FlakyBackend {
+        fn new(inner: SharedBackend) -> Self {
+            Self {
+                inner,
+                failing_offsets: Arc::new(Mutex::new(Vec::new())),
+                fail_all: Arc::new(AtomicU32::new(0)),
+            }
+        }
+
+        fn failing_offsets(&self) -> std::sync::MutexGuard<'_, Vec<usize>> {
+            self.failing_offsets
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+    }
+
+    impl EcBackend for FlakyBackend {
+        fn read_byte(&mut self, offset: usize) -> Result<u8, EcError> {
+            if self.fail_all.load(Ordering::Relaxed) > 0 {
+                self.fail_all.fetch_sub(1, Ordering::Relaxed);
+                return Err(injected_read_error());
+            }
+            if self.failing_offsets().contains(&offset) {
+                return Err(injected_read_error());
+            }
+            self.inner.read_byte(offset)
+        }
+
+        fn write_byte(&mut self, offset: usize, value: u8) -> Result<(), EcError> {
+            self.inner.write_byte(offset, value)
+        }
+
+        fn read_window(&mut self) -> Result<[u8; EC_WINDOW_SIZE], EcError> {
+            self.inner.read_window()
+        }
+    }
+
+    fn injected_read_error() -> EcError {
+        EcError::Io {
+            path: PathBuf::from("/dev/null"),
+            source: std::io::Error::other("injected read error"),
+        }
     }
 
     /// Read the fan control register without holding the lock across a panic.
@@ -557,6 +709,86 @@ mod tests {
             .handle_command(Command::SetHysteresis(false))
             .unwrap();
         assert!(!daemon.engine().hysteresis_enabled());
+    }
+
+    #[test]
+    fn daemon_persists_hysteresis_toggle() {
+        let path = temp_path("hysteresis");
+        std::fs::write(&path, "Hysteresis=1\nLevel=50 2 0 0\nLevel=60 3 0 0\n").unwrap();
+        let (backend, _bytes) = SharedBackend::new();
+        let config = Config::from_file(&path).unwrap();
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+
+        daemon
+            .handle_command(Command::SetHysteresis(false))
+            .unwrap();
+
+        assert!(!daemon.config().general.hysteresis);
+        assert!(!daemon.engine().hysteresis_enabled());
+        // The toggle is written to disk, so it survives a reload and restart.
+        assert!(!Config::from_file(&path).unwrap().general.hysteresis);
+        daemon.handle_command(Command::ReloadConfig).unwrap();
+        assert!(!daemon.engine().hysteresis_enabled());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn daemon_skips_a_failed_sensor_and_keeps_control_running() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        set_byte(&bytes, 0x79, 55);
+        let backend = FlakyBackend::new(backend);
+        let failures = Arc::clone(&backend.failing_offsets);
+        failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(usize::from(0x79u8));
+        let mut daemon = Daemon::new(
+            ec(backend),
+            smart_config(),
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+
+        // The failed sensor is skipped; the other sensors are still read and
+        // the control loop stays alive.
+        daemon.tick(Instant::now()).unwrap();
+        assert!(daemon.last_readings.iter().any(|s| s.name == "cpu"));
+        assert!(!daemon.last_readings.iter().any(|s| s.name == "gpu"));
+        // A partial failure does not count against MaxReadErrors.
+        assert_eq!(daemon.read_errors, 0);
+
+        // Once the sensor recovers, control resumes and the error counter resets.
+        failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(control_register(&bytes), 3);
+        assert_eq!(daemon.read_errors, 0);
+    }
+
+    #[test]
+    fn daemon_tolerates_max_read_errors_before_failing() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        let backend = FlakyBackend::new(backend);
+        let fail_all = Arc::clone(&backend.fail_all);
+        let mut config = smart_config();
+        config.general.max_read_errors = 2;
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+
+        fail_all.store(100, Ordering::Relaxed);
+
+        // Two consecutive failed iterations are tolerated, then the daemon
+        // reports an error so the watchdog can take over.
+        assert!(daemon.tick(Instant::now()).is_ok());
+        assert!(daemon.sample().is_ok());
+        assert!(daemon.tick(Instant::now()).is_err());
     }
 
     #[test]
