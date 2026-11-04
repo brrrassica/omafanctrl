@@ -29,7 +29,7 @@ extract it, and run the installer:
 ```sh
 curl -LO https://github.com/brrrassica/omafanctrl/releases/latest/download/omafanctrl.zip
 unzip omafanctrl.zip
-cd omafanctrl-1.0.1
+cd omafanctrl-1.1.4
 ./scripts/install.sh
 ```
 
@@ -54,13 +54,13 @@ It is idempotent, so re-running it upgrades an existing install in place. Pass
 ## From a release tarball (source)
 
 Every release is published on GitHub with a binary bundle (`omafanctrl.zip`) and
-GitHub's auto-generated source archives. To build the latest release (`v1.0.1`)
+GitHub's auto-generated source archives. To build the latest release (`v1.1.4`)
 from source:
 
 ```sh
-curl -LO https://github.com/brrrassica/omafanctrl/archive/refs/tags/v1.0.1.tar.gz
-tar xf v1.0.1.tar.gz
-cd omafanctrl-1.0.1
+curl -LO https://github.com/brrrassica/omafanctrl/archive/refs/tags/v1.1.4.tar.gz
+tar xf v1.1.4.tar.gz
+cd omafanctrl-1.1.4
 cargo build --release --locked
 ```
 
