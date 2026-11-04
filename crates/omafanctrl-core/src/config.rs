@@ -658,6 +658,10 @@ fn normalize_smart_key(key: &str) -> String {
 
 /// Parse the raw `.ini` text into untyped maps.
 fn parse_raw(input: &str) -> Result<RawIni, ConfigError> {
+    // TPFanCtrl2 is a Windows program, so its `.ini` files are commonly saved
+    // as UTF-8 with a BOM. Strip it before splitting into lines so it cannot
+    // corrupt the first section header or key.
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let mut raw = RawIni::default();
     let mut section: Option<String> = None;
 
@@ -1257,6 +1261,21 @@ Level=60  3  0  0
         let config: Config = "[GENERAL]\nACTIVE=1\nCYCLE=9\n".parse().unwrap();
         assert_eq!(config.general.active, 1);
         assert_eq!(config.general.cycle, 9);
+    }
+
+    #[test]
+    fn strips_a_leading_utf8_bom_from_a_section_header() {
+        let config: Config = "\u{feff}[General]\nActive=3\n".parse().unwrap();
+        assert_eq!(config.general.active, 3);
+    }
+
+    #[test]
+    fn strips_a_leading_utf8_bom_from_a_flat_first_key() {
+        let config: Config = "\u{feff}Active=3\nManFanSpeed=5\nLevel=50 2 0 0\n"
+            .parse()
+            .unwrap();
+        assert_eq!(config.general.active, 3);
+        assert_eq!(config.general.man_fan_speed, 5);
     }
 
     #[test]

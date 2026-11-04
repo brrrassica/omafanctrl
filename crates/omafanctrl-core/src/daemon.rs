@@ -226,6 +226,7 @@ impl<B: EcBackend> Daemon<B> {
             self.publish_state(&readings, fan_rpm);
             return Ok(());
         }
+        self.engine.exit_manual_if_hot(&readings);
         let decision = self.engine.decide(&readings, now);
         match apply_decision(self.watchdog.ec_mut(), decision) {
             Ok(()) => self.engine.commit(decision, now),
@@ -669,6 +670,48 @@ mod tests {
             .unwrap();
         daemon.handle_command(Command::SetManualLevel(2)).unwrap();
         assert_eq!(control_register(&bytes), 2);
+    }
+
+    #[test]
+    fn daemon_exits_manual_mode_above_man_mode_exit() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 50);
+        let config: Config =
+            "Active=3\nManFanSpeed=1\nManModeExit=40\nLevel=50 2 0 0\nLevel=60 3 0 0\n"
+                .parse()
+                .unwrap();
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+        assert_eq!(daemon.engine().mode(), Mode::Manual);
+
+        daemon.tick(Instant::now()).unwrap();
+
+        assert_eq!(daemon.engine().mode(), Mode::Smart);
+        assert_eq!(control_register(&bytes), 2);
+    }
+
+    #[test]
+    fn daemon_stays_manual_below_man_mode_exit() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 40);
+        let config: Config =
+            "Active=3\nManFanSpeed=1\nManModeExit=40\nLevel=50 2 0 0\nLevel=60 3 0 0\n"
+                .parse()
+                .unwrap();
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+        assert_eq!(daemon.engine().mode(), Mode::Manual);
+
+        daemon.tick(Instant::now()).unwrap();
+
+        assert_eq!(daemon.engine().mode(), Mode::Manual);
+        assert_eq!(control_register(&bytes), 1);
     }
 
     #[test]
