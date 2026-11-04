@@ -42,6 +42,9 @@ pub const DEFAULT_SAFETY_CEILING: u8 = FAN_LEVEL_MAX;
 /// The default temperature (°C) at which the engine forces the safety ceiling.
 pub const DEFAULT_EMERGENCY_TEMPERATURE: u8 = 85;
 
+/// The default temperature (°C) at which Manual mode exits to Smart mode.
+pub const DEFAULT_MAN_MODE_EXIT: u8 = 78;
+
 /// The active fan control mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -187,6 +190,8 @@ pub struct EnginePolicy {
     pub safety_ceiling: u8,
     /// The temperature (°C) at which the ceiling is forced.
     pub emergency_temperature: u8,
+    /// The temperature (°C) at which Manual mode exits back to Smart mode.
+    pub man_mode_exit: u8,
     /// Sensor names (or `x<hex>` offsets) excluded from the maximum.
     pub ignore: Vec<String>,
     /// The smart-mode thresholds, in ascending temperature order.
@@ -206,6 +211,7 @@ impl Default for EnginePolicy {
             safety_floor: DEFAULT_SAFETY_FLOOR,
             safety_ceiling: DEFAULT_SAFETY_CEILING,
             emergency_temperature: DEFAULT_EMERGENCY_TEMPERATURE,
+            man_mode_exit: DEFAULT_MAN_MODE_EXIT,
             ignore: Vec::new(),
             smart_levels: Vec::new(),
             hysteresis_enabled: true,
@@ -229,6 +235,7 @@ impl EnginePolicy {
             ignore: config.sensors.ignore.clone(),
             smart_levels,
             hysteresis_enabled: config.general.hysteresis,
+            man_mode_exit: config.general.man_mode_exit,
             ..Self::default()
         }
     }
@@ -334,6 +341,27 @@ impl Engine {
         self.last_change = None;
     }
 
+    /// Exit Manual mode when the hottest usable sensor exceeds `ManModeExit`.
+    ///
+    /// Mirrors TPFanCtrl2's `HandleData`: Manual mode is a temporary override,
+    /// and once the temperature passes the configured exit threshold the engine
+    /// returns to Smart mode. The dwell timer is cleared so the smart level
+    /// takes effect immediately. Returns `true` when the mode changed.
+    pub fn exit_manual_if_hot(&mut self, readings: &[SensorReading]) -> bool {
+        if self.mode != Mode::Manual {
+            return false;
+        }
+        let Some(max_temperature) = self.max_temperature(readings) else {
+            return false;
+        };
+        if max_temperature <= self.policy.man_mode_exit {
+            return false;
+        }
+        self.mode = Mode::Smart;
+        self.clear_dwell();
+        true
+    }
+
     /// The maximum usable temperature across the readings, if any.
     pub fn max_temperature(&self, readings: &[SensorReading]) -> Option<u8> {
         readings
@@ -435,6 +463,7 @@ impl Engine {
     /// tests). The daemon uses [`Engine::decide`] and [`Engine::commit`]
     /// separately so that a failed EC write is retried on the next tick.
     pub fn evaluate(&mut self, readings: &[SensorReading], now: Instant) -> Decision {
+        self.exit_manual_if_hot(readings);
         let decision = self.decide(readings, now);
         self.commit(decision, now);
         decision
@@ -657,6 +686,7 @@ mod tests {
             safety_floor: 1,
             safety_ceiling: FAN_LEVEL_MAX,
             emergency_temperature: DEFAULT_EMERGENCY_TEMPERATURE,
+            man_mode_exit: DEFAULT_MAN_MODE_EXIT,
             ignore: Vec::new(),
             smart_levels,
             hysteresis_enabled: true,
@@ -701,6 +731,34 @@ mod tests {
         let decision = engine.evaluate(&[reading(0x78, "cpu", 40)], Instant::now());
         assert_eq!(decision, Decision::SetLevel(3));
         assert_eq!(engine.current_level(), Some(3));
+    }
+
+    #[test]
+    fn manual_mode_exits_to_smart_above_man_mode_exit() {
+        let levels = vec![smart_level(50, 2, 0, 0), smart_level(60, 3, 0, 0)];
+        let mut engine = Engine::new(EnginePolicy {
+            min_dwell: Duration::from_secs(3600),
+            man_mode_exit: 40,
+            ..policy(levels)
+        });
+        engine.set_mode(Mode::Manual);
+        engine.set_manual_level(1);
+        let start = Instant::now();
+
+        // At the threshold Manual mode is retained.
+        assert_eq!(
+            engine.evaluate(&[reading(0x78, "cpu", 40)], start),
+            Decision::SetLevel(1)
+        );
+        assert_eq!(engine.mode(), Mode::Manual);
+
+        // Above the threshold the engine returns to Smart mode and its level
+        // takes effect immediately, bypassing the dwell timer.
+        assert_eq!(
+            engine.evaluate(&[reading(0x78, "cpu", 50)], start + Duration::from_secs(1)),
+            Decision::SetLevel(2)
+        );
+        assert_eq!(engine.mode(), Mode::Smart);
     }
 
     #[test]
@@ -951,6 +1009,7 @@ mod tests {
         let config: Config = "\
 IgnoreSensors=pwr,no5
 Hysteresis=0
+ManModeExit=65
 Level=50 2 0 0
 Level=60 3 0 0
 "
@@ -960,6 +1019,7 @@ Level=60 3 0 0
         assert_eq!(policy.ignore, vec!["pwr", "no5"]);
         assert_eq!(policy.smart_levels.len(), 2);
         assert!(!policy.hysteresis_enabled);
+        assert_eq!(policy.man_mode_exit, 65);
     }
 
     #[test]
