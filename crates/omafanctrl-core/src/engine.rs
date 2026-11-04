@@ -145,23 +145,35 @@ pub fn sensor_display_name(offset: u8) -> String {
 ///
 /// Unknown offsets are labelled `x<hex>` (for example `x7a`), matching the
 /// convention used by the shipped profile's ignore list.
+///
+/// A failed register read is skipped so the remaining sensors are still
+/// returned, matching [`Ec::read_temperatures`]. An error is returned only when
+/// every requested sensor failed.
 pub fn read_sensor_readings<B: EcBackend>(
     ec: &mut Ec<B>,
     offsets: &[u8],
 ) -> Result<Vec<SensorReading>, EcError> {
     let mut readings = Vec::with_capacity(offsets.len());
+    let mut last_error = None;
     for &offset in offsets {
-        let celsius = ec.read_byte(offset)?;
-        let name = default_sensor_name(offset)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("x{offset:02x}"));
-        readings.push(SensorReading {
-            offset,
-            name,
-            celsius,
-        });
+        match ec.read_byte(offset) {
+            Ok(celsius) => {
+                let name = default_sensor_name(offset)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("x{offset:02x}"));
+                readings.push(SensorReading {
+                    offset,
+                    name,
+                    celsius,
+                });
+            }
+            Err(error) => last_error = Some(error),
+        }
     }
-    Ok(readings)
+    match (readings.is_empty(), last_error) {
+        (true, Some(error)) => Err(error),
+        _ => Ok(readings),
+    }
 }
 
 /// The engine's tunable policy.

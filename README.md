@@ -16,7 +16,7 @@ in one step:
 ```sh
 curl -LO https://github.com/brrrassica/omafanctrl/releases/latest/download/omafanctrl.zip
 unzip omafanctrl.zip
-cd omafanctrl-1.1.3
+cd omafanctrl-1.1.4
 ./scripts/install.sh
 ```
 
@@ -25,7 +25,7 @@ and refuses to run on anything other than Omarchy 4 on a ThinkPad.
 
 Other options: the AUR (`yay -S omafanctrl`) or a manual build — see
 [docs/install.md](docs/install.md). The latest release is
-[`v1.1.3`](https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.3); the
+[`v1.1.4`](https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.4); the
 change history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Components

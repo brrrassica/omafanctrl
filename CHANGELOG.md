@@ -7,8 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-11-04
+
 ### Fixed
 
+- **A single EC read error no longer terminates the daemon.** The control loop
+  and the 4 Hz telemetry sample now survive transient Embedded Controller read
+  failures: a failed sensor offset is skipped and filled from the last good
+  sample, a failed tachometer read keeps the last known RPM, and
+  `[General] MaxReadErrors` is finally consulted. Only after that many
+  consecutive failed iterations does the daemon exit so systemd can restart it
+  and the watchdog can revert the fan.
+- **Hysteresis toggled at runtime is persisted.** `SetHysteresis` (D-Bus, CLI,
+  or GUI) now updates `[General] Hysteresis` in the live configuration and
+  writes it back, instead of only flipping the in-memory engine policy and
+  having the next reload or restart silently restore the file value.
 - **`Cycle` is honored.** The daemon now uses `[General] Cycle` as its
   control-loop cadence and re-reads it on configuration reload; `--interval`
   overrides it when given.
@@ -52,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration is kept, and a genuinely fatal loop error now exits the daemon
   non-zero so systemd can restart it.
 
+[1.1.4]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.4
 [1.1.3]: https://github.com/omafanctrl/omafanctrl/releases/tag/v1.1.3
 
 ## [1.1.2] - 2026-11-01

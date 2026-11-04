@@ -10,8 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Every job runs on every push (branches and tags) and on pull requests; no
-  # job is gated behind a ref condition.
+  # `check` and `package` run on every push (branches and tags) and on pull
+  # requests; only `release` is gated behind a ref condition (see below).
   #
   # The jobs run on the repo's self-hosted runners (Debian 13, rootless Docker)
   # inside an Arch Linux container because the GUI requires libadwaita >= 1.7,
@@ -102,20 +102,57 @@ jobs:
           path: omafanctrl.zip
           if-no-files-found: error
 
+  # Publishes the GitHub release. Only pushes publish: a merge to master (the
+  # workflow's push branches) or an existing v* tag. Pull request runs build and
+  # package the bundle but never publish, so a PR no longer fails because it has
+  # no tag.
+  #
+  # The tag is derived from the workspace version in Cargo.toml, so merging a
+  # release commit (version bump) is enough to publish. The tag is pushed with
+  # GITHUB_TOKEN, which by design does not re-trigger this workflow, so the run
+  # that created the tag is also the run that publishes the release.
   release:
     name: Publish release
+    if: github.event_name == 'push'
     runs-on: [self-hosted, Linux, X64, opencode-sam, debian-13, omafanctrl]
     needs: package
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Publishing omafanctrl $version"
+
       - name: Download omafanctrl.zip
         uses: actions/download-artifact@v4
         with:
           name: omafanctrl.zip
 
+      - name: Ensure the release tag exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; publishing against it."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "omafanctrl ${TAG#v}"
+          git push origin "$TAG"
+          echo "Created and pushed annotated tag $TAG at $GITHUB_SHA."
+
       - name: Publish the GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.version.outputs.version }}
           files: omafanctrl.zip
           generate_release_notes: true
