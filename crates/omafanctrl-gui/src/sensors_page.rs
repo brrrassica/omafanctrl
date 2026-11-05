@@ -10,7 +10,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use omafanctrl_core::config::Config;
 use omafanctrl_core::dbus::{SensorState, State};
-use omafanctrl_core::engine::sensor_display_name;
+use omafanctrl_core::engine::{sensor_display_name, sensor_sequence};
 
 use crate::state::{AppState, sensor_is_ignored, set_sensor_ignored};
 
@@ -81,13 +81,16 @@ impl SensorsPage {
             let row = adw::EntryRow::builder()
                 .title(sensor_display_name(*offset))
                 .build();
+            let sequence = sensor_sequence(*offset);
             if let Some(config) = &config {
-                if let Some((_, display)) = config
-                    .sensors
-                    .names
-                    .iter()
-                    .find(|(_, display)| display.as_str() == name.as_str())
-                {
+                let display = config.sensors.names.get(&sequence).or_else(|| {
+                    config
+                        .sensors
+                        .names
+                        .values()
+                        .find(|display| display.as_str() == name.as_str())
+                });
+                if let Some(display) = display {
                     row.set_text(display);
                 }
             }
@@ -113,20 +116,20 @@ impl SensorsPage {
 
             let state_for_entry = self.state.clone();
             let name_for_entry = name.clone();
+            let offset_for_entry = *offset;
             row.connect_apply(move |row| {
                 let config = state_for_entry.config.borrow().clone();
                 if let Some(mut config) = config {
                     let display = row.text().to_string();
-                    if let Some((sequence, _)) = config
-                        .sensors
-                        .names
-                        .iter()
-                        .find(|(_, value)| value.as_str() == name_for_entry)
-                        .map(|(sequence, value)| (*sequence, value.clone()))
-                    {
-                        config.sensors.names.insert(sequence, display);
-                        state_for_entry.set_config(&config);
-                    }
+                    // SensorName entries are keyed by the sensor's stable
+                    // sequence, never by the editable display text, so a rename
+                    // survives the next rebuild.
+                    let sequence = sensor_sequence(offset_for_entry);
+                    config.sensors.names.retain(|key, value| {
+                        *key == sequence || value.as_str() != name_for_entry.as_str()
+                    });
+                    config.sensors.names.insert(sequence, display);
+                    state_for_entry.set_config(&config);
                 }
             });
 

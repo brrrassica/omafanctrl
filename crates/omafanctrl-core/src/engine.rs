@@ -144,6 +144,21 @@ pub fn sensor_display_name(offset: u8) -> String {
     }
 }
 
+/// The sensor sequence number used as the key of a `SensorName<N>` entry.
+///
+/// The sequence is the sensor's index in the TPFanCtrl2 sensor table: the
+/// primary bank `0x78`–`0x7F` followed by the secondary bank `0xC0`–`0xC3`.
+/// This makes the shipped `SensorName5=no5` entry refer to `no5` at offset
+/// `0x7D`. Offsets outside the table use the offset itself, which keeps the
+/// key stable and collision-free for the sensors the daemon publishes.
+pub fn sensor_sequence(offset: u8) -> u8 {
+    match offset {
+        0x78..=0x7F => offset - 0x78,
+        0xC0..=0xC3 => offset - 0xC0 + 8,
+        _ => offset,
+    }
+}
+
 /// Read a set of sensor offsets into named [`SensorReading`]s.
 ///
 /// Unknown offsets are labelled `x<hex>` (for example `x7a`), matching the
@@ -1120,6 +1135,16 @@ Level=60 3 0 0
         // Offsets whose only name is a hex code fall back to the register label.
         assert_eq!(sensor_display_name(0x7D), "Register 0x7D");
         assert_eq!(sensor_display_name(0x7A), "Register 0x7A");
+    }
+
+    #[test]
+    fn sensor_sequences_match_the_shipped_profile() {
+        // `SensorName5=no5` in the shipped profile names the 0x7D sensor.
+        assert_eq!(sensor_sequence(0x7D), 5);
+        assert_eq!(sensor_sequence(0x78), 0);
+        assert_eq!(sensor_sequence(0xC0), 8);
+        // Unknown offsets still get a stable key.
+        assert_eq!(sensor_sequence(0x50), 0x50);
     }
 
     // --- Watchdog verification (M9) --------------------------------------

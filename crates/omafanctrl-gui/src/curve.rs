@@ -61,11 +61,7 @@ impl CurveEditor {
             let fan_level = y_to_level(start_y + offset_y, height);
 
             let mut levels = levels_for_drag.borrow_mut();
-            if let Some(index) = nearest_index(&levels, temperature) {
-                levels[index].temperature =
-                    temperature.round().clamp(0.0, f64::from(TEMP_MAX_C)) as u8;
-                levels[index].fan_level = fan_level;
-                levels.sort_by_key(|level| level.temperature);
+            if move_level(&mut levels, temperature, fan_level) {
                 let updated = levels.clone();
                 drop(levels);
                 area_for_drag.queue_draw();
@@ -135,6 +131,36 @@ fn nearest_index(levels: &[SmartLevel], temperature: f64) -> Option<usize> {
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|(index, _)| index)
+}
+
+/// Move the threshold nearest to `temperature` to the dragged position.
+///
+/// The fan level is clamped between the new neighbouring points so a drag can
+/// never create a curve whose level decreases as the temperature rises. This
+/// keeps the editor from producing a configuration that `Config::validate`
+/// rejects.
+fn move_level(levels: &mut Vec<SmartLevel>, temperature: f64, fan_level: u8) -> bool {
+    let Some(index) = nearest_index(levels, temperature) else {
+        return false;
+    };
+    let mut moved = levels.remove(index);
+    moved.temperature = temperature.round().clamp(0.0, f64::from(TEMP_MAX_C)) as u8;
+    moved.fan_level = fan_level;
+
+    let insert_at = levels.partition_point(|level| level.temperature < moved.temperature);
+    let previous_level = insert_at
+        .checked_sub(1)
+        .map_or(FAN_LEVEL_MIN, |index| levels[index].fan_level);
+    let next_level = levels
+        .get(insert_at)
+        .map_or(FAN_LEVEL_MAX, |level| level.fan_level);
+    if moved.fan_level < previous_level {
+        moved.fan_level = previous_level;
+    } else if moved.fan_level > next_level {
+        moved.fan_level = next_level;
+    }
+    levels.insert(insert_at, moved);
+    true
 }
 
 /// Draw the curve.
@@ -217,5 +243,34 @@ mod tests {
         ];
         assert_eq!(nearest_index(&levels, 42.0), Some(0));
         assert_eq!(nearest_index(&levels, 68.0), Some(1));
+    }
+
+    fn level(temperature: u8, fan_level: u8) -> SmartLevel {
+        SmartLevel {
+            temperature,
+            fan_level,
+            hyst_up: 0,
+            hyst_down: 0,
+        }
+    }
+
+    #[test]
+    fn dragging_cannot_make_fan_levels_decrease() {
+        let mut levels = vec![level(40, 1), level(50, 2), level(60, 3)];
+
+        // Drag the first point to the right while asking for the highest level:
+        // it must stop at the next point's fan level.
+        assert!(move_level(&mut levels, 30.0, 3));
+        assert_eq!(levels[0], level(30, 2));
+
+        // Drag the last point to the left while asking for the lowest level: it
+        // must stay at or above the previous point's fan level.
+        assert!(move_level(&mut levels, 65.0, 1));
+        assert_eq!(levels[2], level(65, 2));
+        assert!(
+            levels
+                .windows(2)
+                .all(|pair| pair[0].fan_level <= pair[1].fan_level)
+        );
     }
 }
