@@ -187,6 +187,15 @@ pub enum ValidationError {
         temperatures: Vec<u8>,
     },
 
+    /// A smart mode's fan levels decreased as the temperature rose.
+    #[error("smart mode {mode} fan levels must be non-decreasing, got {fan_levels:?}")]
+    SmartFanLevelsNotAscending {
+        /// The 1-based smart mode number.
+        mode: usize,
+        /// The fan levels in declaration order.
+        fan_levels: Vec<u8>,
+    },
+
     /// The ignore list contained an empty sensor name.
     #[error("`IgnoreSensors` contains an empty sensor name")]
     EmptySensorName,
@@ -414,6 +423,7 @@ impl Config {
                 return Err(ValidationError::SmartModeEmpty { mode: mode_number });
             }
             let mut temperatures = Vec::with_capacity(mode.levels.len());
+            let mut fan_levels = Vec::with_capacity(mode.levels.len());
             for level in &mode.levels {
                 if level.temperature > TEMP_MAX_C {
                     return Err(ValidationError::SmartTemperatureOutOfRange {
@@ -428,11 +438,18 @@ impl Config {
                     });
                 }
                 temperatures.push(level.temperature);
+                fan_levels.push(level.fan_level);
             }
             if !temperatures.windows(2).all(|pair| pair[0] < pair[1]) {
                 return Err(ValidationError::SmartTemperaturesNotAscending {
                     mode: mode_number,
                     temperatures,
+                });
+            }
+            if !fan_levels.windows(2).all(|pair| pair[0] <= pair[1]) {
+                return Err(ValidationError::SmartFanLevelsNotAscending {
+                    mode: mode_number,
+                    fan_levels,
                 });
             }
         }
@@ -1418,6 +1435,23 @@ Foo=bar
             error,
             ConfigError::Validation(ValidationError::SmartTemperaturesNotAscending { mode: 1, .. })
         ));
+    }
+
+    #[test]
+    fn rejects_decreasing_smart_fan_levels() {
+        let input = "Level=50 3 0 0\nLevel=60 1 0 0\n";
+        let error = input.parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::SmartFanLevelsNotAscending { mode: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn accepts_non_decreasing_smart_fan_levels() {
+        let input = "Level=50 2 0 0\nLevel=60 2 0 0\n";
+        let config: Config = input.parse().unwrap();
+        assert_eq!(config.smart_modes[0].levels[1].fan_level, 2);
     }
 
     #[test]
