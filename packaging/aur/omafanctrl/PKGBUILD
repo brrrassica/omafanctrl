@@ -1,4 +1,4 @@
-# Maintainer: omafanctrl contributors <https://github.com/omafanctrl/omafanctrl>
+# Maintainer: omafanctrl contributors <https://github.com/brrrassica/omafanctrl>
 #
 # AUR package for omafanctrl (stable release).
 #
@@ -14,7 +14,7 @@ pkgver=1.1.4
 pkgrel=1
 pkgdesc="Modern fan control suite for the ThinkPad E14 Gen 4 on Omarchy Quattro"
 arch=('x86_64')
-url="https://github.com/omafanctrl/omafanctrl"
+url="https://github.com/brrrassica/omafanctrl"
 license=('MIT')
 depends=('gtk4' 'libadwaita' 'dbus' 'polkit')
 makedepends=('cargo' 'git' 'pkgconf')
