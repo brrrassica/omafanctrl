@@ -224,6 +224,10 @@ pub enum ServiceError {
     #[error("the daemon is not accepting commands")]
     ChannelClosed,
 
+    /// The control loop's command queue is temporarily full.
+    #[error("the daemon is too busy to accept more commands; try again")]
+    ChannelFull,
+
     /// The supplied configuration is invalid.
     #[error(transparent)]
     Config(#[from] ConfigError),
@@ -310,15 +314,18 @@ impl ControlService {
 
     /// Validate, persist, and apply new configuration text.
     ///
-    /// The configuration is validated before it is written, so an invalid
-    /// document never reaches disk.
+    /// The configuration is validated and a command-queue slot is reserved
+    /// before it is written, so an invalid document or a full queue never
+    /// reaches disk.
     pub fn set_config(&self, contents: &str) -> Result<(), ServiceError> {
         let _validated: Config = contents.parse()?;
+        let permit = self.commands.try_reserve().map_err(channel_error)?;
         std::fs::write(&self.config_path, contents).map_err(|source| ServiceError::Io {
             path: self.config_path.clone(),
             source,
         })?;
-        self.reload_config()
+        permit.send(Command::ReloadConfig);
+        Ok(())
     }
 
     /// Re-read the configuration file from disk.
@@ -327,9 +334,15 @@ impl ControlService {
     }
 
     fn send(&self, command: Command) -> Result<(), ServiceError> {
-        self.commands
-            .try_send(command)
-            .map_err(|_| ServiceError::ChannelClosed)
+        self.commands.try_send(command).map_err(channel_error)
+    }
+}
+
+/// Map a failed non-blocking send onto the matching service error.
+fn channel_error<T>(error: mpsc::error::TrySendError<T>) -> ServiceError {
+    match error {
+        mpsc::error::TrySendError::Full(_) => ServiceError::ChannelFull,
+        mpsc::error::TrySendError::Closed(_) => ServiceError::ChannelClosed,
     }
 }
 
@@ -619,5 +632,43 @@ mod tests {
             service.set_mode("smart"),
             Err(ServiceError::ChannelClosed)
         ));
+    }
+
+    #[test]
+    fn commands_report_a_full_channel_while_the_loop_is_alive() {
+        let (state_tx, state_rx) = watch::channel(State::default());
+        let (_config_tx, config_rx) = watch::channel(String::new());
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let service = ControlService::new(
+            state_rx,
+            config_rx,
+            command_tx,
+            PathBuf::from("/tmp/omafanctrl-test.ini"),
+        );
+        service.set_mode("smart").expect("first command fits");
+        assert!(matches!(
+            service.set_mode("bios"),
+            Err(ServiceError::ChannelFull)
+        ));
+        drop(state_tx);
+        drop(command_rx);
+    }
+
+    #[test]
+    fn set_config_does_not_write_when_the_command_queue_is_full() {
+        let path =
+            std::env::temp_dir().join(format!("omafanctrl-dbus-full-{}.ini", std::process::id()));
+        let (state_tx, state_rx) = watch::channel(State::default());
+        let (_config_tx, config_rx) = watch::channel(String::new());
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let service = ControlService::new(state_rx, config_rx, command_tx, path.clone());
+        service.reload_config().expect("first command fits");
+        assert!(matches!(
+            service.set_config("Active=1\nLevel=50 2 0 0\n"),
+            Err(ServiceError::ChannelFull)
+        ));
+        assert!(!path.exists());
+        drop(state_tx);
+        drop(command_rx);
     }
 }

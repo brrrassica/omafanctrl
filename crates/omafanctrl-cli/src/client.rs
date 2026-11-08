@@ -78,20 +78,25 @@ impl Client {
 
 /// Turn a zbus error into a message that is useful in a hotkey context.
 fn describe_error(error: &zbus::Error) -> String {
-    if let zbus::Error::MethodError(name, _, _) = error {
-        return describe_method_error(name.as_str());
+    if let zbus::Error::MethodError(name, detail, _) = error {
+        return describe_method_error(name.as_str(), detail.as_deref());
     }
     error.to_string()
 }
 
-/// Describe a D-Bus method error by its name.
-fn describe_method_error(name: &str) -> String {
+/// Describe a D-Bus method error by its name and optional daemon detail.
+fn describe_method_error(name: &str, detail: Option<&str>) -> String {
     if name.contains("NotAuthorized") || name.contains("AccessDenied") {
         "authorization denied: authenticate when prompted, or grant the polkit \
          action org.omarchy.omafanctrl.control"
             .to_string()
     } else {
-        format!("the daemon rejected the request: {name}")
+        match detail {
+            Some(detail) if !detail.is_empty() => {
+                format!("the daemon rejected the request: {name}: {detail}")
+            }
+            _ => format!("the daemon rejected the request: {name}"),
+        }
     }
 }
 
@@ -101,15 +106,46 @@ mod tests {
 
     #[test]
     fn describes_authorization_errors() {
-        let message = describe_method_error("org.freedesktop.PolicyKit1.Error.NotAuthorized");
+        let message = describe_method_error(
+            "org.freedesktop.PolicyKit1.Error.NotAuthorized",
+            Some("not authorized"),
+        );
         assert!(message.contains("authorization denied"));
-        let message = describe_method_error("org.freedesktop.DBus.Error.AccessDenied");
+        let message = describe_method_error(
+            "org.freedesktop.DBus.Error.AccessDenied",
+            Some("access denied"),
+        );
         assert!(message.contains("authorization denied"));
     }
 
     #[test]
     fn describes_other_method_errors() {
-        let message = describe_method_error("org.omarchy.omafanctrl.Error.UnknownMode");
+        let message = describe_method_error("org.omarchy.omafanctrl.Error.UnknownMode", None);
         assert!(message.contains("UnknownMode"));
+    }
+
+    #[test]
+    fn keeps_daemon_detail_from_method_errors() {
+        let message = describe_method_error(
+            "org.omarchy.omafanctrl.Error.InvalidConfig",
+            Some("Level must be between 0 and 7"),
+        );
+        assert!(message.contains("Level must be between 0 and 7"));
+    }
+
+    #[test]
+    fn keeps_daemon_detail_when_translating_a_method_error() {
+        let reply = zbus::Message::method_call("/org/omarchy/omafanctrl", "SetConfig")
+            .unwrap()
+            .build(&())
+            .unwrap();
+        let error = zbus::Error::MethodError(
+            zbus::names::OwnedErrorName::try_from("org.omarchy.omafanctrl.Error.InvalidConfig")
+                .unwrap(),
+            Some("Level must be between 0 and 7".to_string()),
+            reply,
+        );
+        let message = describe_error(&error);
+        assert!(message.contains("Level must be between 0 and 7"));
     }
 }
