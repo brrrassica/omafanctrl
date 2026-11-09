@@ -6,6 +6,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use omafanctrl_core::config::{Config, SmartMode};
 use omafanctrl_core::dbus::State;
+use omafanctrl_core::ec::TEMP_MAX_C;
 
 use crate::curve::CurveEditor;
 use crate::state::AppState;
@@ -100,8 +101,27 @@ impl CurvePage {
                 let config = state_for_row.config.borrow().clone();
                 if let Some(mut config) = config {
                     if let Some(mode) = config.smart_modes.first_mut() {
-                        if let Some(level) = mode.levels.get_mut(index) {
-                            level.temperature = row.value().round().clamp(0.0, 127.0) as u8;
+                        if index < mode.levels.len() {
+                            // Keep the threshold strictly between its neighbours;
+                            // otherwise `Config::validate` rejects the edit and the
+                            // next refresh silently restores the old value.
+                            let minimum = index.checked_sub(1).map_or(0, |previous| {
+                                mode.levels[previous].temperature.saturating_add(1)
+                            });
+                            let maximum = mode
+                                .levels
+                                .get(index + 1)
+                                .map_or(TEMP_MAX_C, |next| next.temperature.saturating_sub(1));
+                            let maximum = maximum.max(minimum);
+                            let temperature =
+                                (row.value().round().clamp(0.0, f64::from(TEMP_MAX_C)) as u8)
+                                    .clamp(minimum, maximum);
+                            mode.levels[index].temperature = temperature;
+                            if (row.value() - f64::from(temperature)).abs() > f64::EPSILON {
+                                updating.set(true);
+                                row.set_value(f64::from(temperature));
+                                updating.set(false);
+                            }
                         }
                     }
                     state_for_row.set_config(&config);

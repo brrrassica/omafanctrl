@@ -44,16 +44,27 @@ impl CurveEditor {
 
         let drag = gtk::GestureDrag::new();
         let start = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
+        let dragged = Rc::new(Cell::new(None));
         let start_begin = Rc::clone(&start);
+        let dragged_begin = Rc::clone(&dragged);
+        let levels_for_begin = Rc::clone(&levels);
+        let area_for_begin = area.clone();
         drag.connect_drag_begin(move |_, x, y| {
             start_begin.set((x, y));
+            let width = f64::from(area_for_begin.width());
+            let temperature = x_to_temperature(x, width);
+            dragged_begin.set(nearest_index(&levels_for_begin.borrow(), temperature));
         });
 
         let levels_for_drag = Rc::clone(&levels);
         let on_change_for_drag = Rc::clone(&on_change);
         let area_for_drag = area.clone();
         let start_update = Rc::clone(&start);
+        let dragged_update = Rc::clone(&dragged);
         drag.connect_drag_update(move |_, offset_x, offset_y| {
+            let Some(index) = dragged_update.get() else {
+                return;
+            };
             let (start_x, start_y) = start_update.get();
             let width = f64::from(area_for_drag.width());
             let height = f64::from(area_for_drag.height());
@@ -61,7 +72,7 @@ impl CurveEditor {
             let fan_level = y_to_level(start_y + offset_y, height);
 
             let mut levels = levels_for_drag.borrow_mut();
-            if move_level(&mut levels, temperature, fan_level) {
+            if move_level_at(&mut levels, index, temperature, fan_level) {
                 let updated = levels.clone();
                 drop(levels);
                 area_for_drag.queue_draw();
@@ -133,33 +144,41 @@ fn nearest_index(levels: &[SmartLevel], temperature: f64) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-/// Move the threshold nearest to `temperature` to the dragged position.
-///
-/// The fan level is clamped between the new neighbouring points so a drag can
-/// never create a curve whose level decreases as the temperature rises. This
-/// keeps the editor from producing a configuration that `Config::validate`
-/// rejects.
-fn move_level(levels: &mut Vec<SmartLevel>, temperature: f64, fan_level: u8) -> bool {
-    let Some(index) = nearest_index(levels, temperature) else {
-        return false;
-    };
-    let mut moved = levels.remove(index);
-    moved.temperature = temperature.round().clamp(0.0, f64::from(TEMP_MAX_C)) as u8;
-    moved.fan_level = fan_level;
-
-    let insert_at = levels.partition_point(|level| level.temperature < moved.temperature);
-    let previous_level = insert_at
+/// The inclusive range a threshold at `index` may take while staying strictly
+/// between its neighbours.
+fn temperature_bounds(levels: &[SmartLevel], index: usize) -> (u8, u8) {
+    let minimum = index
         .checked_sub(1)
-        .map_or(FAN_LEVEL_MIN, |index| levels[index].fan_level);
-    let next_level = levels
-        .get(insert_at)
-        .map_or(FAN_LEVEL_MAX, |level| level.fan_level);
-    if moved.fan_level < previous_level {
-        moved.fan_level = previous_level;
-    } else if moved.fan_level > next_level {
-        moved.fan_level = next_level;
+        .map_or(0, |previous| levels[previous].temperature.saturating_add(1));
+    let maximum = levels
+        .get(index + 1)
+        .map_or(TEMP_MAX_C, |next| next.temperature.saturating_sub(1));
+    (minimum, maximum.max(minimum))
+}
+
+/// Move the threshold at `index` to the dragged position.
+///
+/// The index is captured when the drag starts, so the grabbed handle keeps
+/// moving even when the cursor gets nearer to a different threshold. The
+/// temperature is clamped strictly between its neighbours and the fan level
+/// between theirs, so a drag can never create a configuration that
+/// `Config::validate` rejects.
+fn move_level_at(levels: &mut [SmartLevel], index: usize, temperature: f64, fan_level: u8) -> bool {
+    if index >= levels.len() {
+        return false;
     }
-    levels.insert(insert_at, moved);
+    let (minimum_temperature, maximum_temperature) = temperature_bounds(levels, index);
+    let previous_level = index
+        .checked_sub(1)
+        .map_or(FAN_LEVEL_MIN, |previous| levels[previous].fan_level);
+    let next_level = levels
+        .get(index + 1)
+        .map_or(FAN_LEVEL_MAX, |next| next.fan_level);
+
+    let moved = &mut levels[index];
+    moved.temperature = (temperature.round().clamp(0.0, f64::from(TEMP_MAX_C)) as u8)
+        .clamp(minimum_temperature, maximum_temperature);
+    moved.fan_level = fan_level.clamp(previous_level, next_level);
     true
 }
 
@@ -258,19 +277,52 @@ mod tests {
     fn dragging_cannot_make_fan_levels_decrease() {
         let mut levels = vec![level(40, 1), level(50, 2), level(60, 3)];
 
-        // Drag the first point to the right while asking for the highest level:
-        // it must stop at the next point's fan level.
-        assert!(move_level(&mut levels, 30.0, 3));
+        // Drag the first point while asking for the highest level: it must stop
+        // at the next point's fan level.
+        assert!(move_level_at(&mut levels, 0, 30.0, 3));
         assert_eq!(levels[0], level(30, 2));
 
-        // Drag the last point to the left while asking for the lowest level: it
-        // must stay at or above the previous point's fan level.
-        assert!(move_level(&mut levels, 65.0, 1));
+        // Drag the last point while asking for the lowest level: it must stay at
+        // or above the previous point's fan level.
+        assert!(move_level_at(&mut levels, 2, 65.0, 1));
         assert_eq!(levels[2], level(65, 2));
         assert!(
             levels
                 .windows(2)
                 .all(|pair| pair[0].fan_level <= pair[1].fan_level)
+        );
+    }
+
+    #[test]
+    fn dragging_moves_the_grabbed_point_not_the_nearest_one() {
+        let mut levels = vec![level(40, 1), level(70, 3)];
+
+        // The drag started on the 40 point, so passing 64 (nearer the 70 point)
+        // must not move the neighbour.
+        assert!(move_level_at(&mut levels, 0, 64.0, 1));
+        assert_eq!(levels[0], level(64, 1));
+        assert_eq!(levels[1], level(70, 3));
+    }
+
+    #[test]
+    fn dragging_cannot_equal_or_cross_neighbouring_temperatures() {
+        let mut levels = vec![level(40, 1), level(50, 2), level(60, 3)];
+
+        // Dragging the first point past its right neighbour stops just below it.
+        assert!(move_level_at(&mut levels, 0, 65.0, 1));
+        assert_eq!(levels[0], level(49, 1));
+
+        // Dragging the last point past its left neighbour stops just above it.
+        assert!(move_level_at(&mut levels, 2, 45.0, 3));
+        assert_eq!(levels[2], level(51, 3));
+
+        // A tie requested at the middle point is clamped to its only valid value.
+        assert!(move_level_at(&mut levels, 1, 51.0, 2));
+        assert_eq!(levels[1], level(50, 2));
+        assert!(
+            levels
+                .windows(2)
+                .all(|pair| pair[0].temperature < pair[1].temperature)
         );
     }
 }
