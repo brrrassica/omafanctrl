@@ -14,6 +14,7 @@
 //! in [`omafanctrl_core::fan_curve`]. It always restores BIOS auto control when
 //! it finishes.
 
+use std::ops::{Deref, DerefMut};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -192,22 +193,125 @@ struct SweepPoint {
     acpi_rpm: Option<u16>,
 }
 
+/// Tracks an interrupt request without doing EC I/O from the signal handler.
+mod interrupt {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+    #[cfg(unix)]
+    const SIGINT: i32 = 2;
+    #[cfg(unix)]
+    const SIGTERM: i32 = 15;
+
+    #[cfg(unix)]
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: extern "C" fn(i32)) -> *mut core::ffi::c_void;
+    }
+
+    #[cfg(unix)]
+    extern "C" fn handle_signal(_signum: i32) {
+        INTERRUPTED.store(true, Ordering::SeqCst);
+    }
+
+    /// Best-effort installation of handlers that request a clean sweep abort.
+    pub fn install() {
+        #[cfg(unix)]
+        unsafe {
+            signal(SIGINT, handle_signal);
+            signal(SIGTERM, handle_signal);
+        }
+    }
+
+    /// Whether a signal has requested an abort since the process started.
+    pub fn interrupted() -> bool {
+        INTERRUPTED.load(Ordering::SeqCst)
+    }
+}
+
+/// Sleep for `duration`, returning early when an interrupt is requested.
+fn sleep_interruptible(duration: Duration) -> bool {
+    const CHECK_INTERVAL: Duration = Duration::from_millis(100);
+    let mut remaining = duration;
+    while !remaining.is_zero() {
+        if interrupt::interrupted() {
+            return true;
+        }
+        let chunk = remaining.min(CHECK_INTERVAL);
+        std::thread::sleep(chunk);
+        remaining = remaining.saturating_sub(chunk);
+    }
+    interrupt::interrupted()
+}
+
+/// Restores BIOS auto control when dropped, unless it was already restored.
+struct FanAutoGuard<'a, B: EcBackend> {
+    ec: &'a mut Ec<B>,
+    armed: bool,
+}
+
+impl<'a, B: EcBackend> FanAutoGuard<'a, B> {
+    fn new(ec: &'a mut Ec<B>) -> Self {
+        Self { ec, armed: true }
+    }
+
+    fn restore(&mut self) -> Result<(), EcError> {
+        let result = self.ec.set_fan_auto();
+        if result.is_ok() {
+            self.armed = false;
+        }
+        result
+    }
+}
+
+impl<B: EcBackend> Deref for FanAutoGuard<'_, B> {
+    type Target = Ec<B>;
+
+    fn deref(&self) -> &Self::Target {
+        self.ec
+    }
+}
+
+impl<B: EcBackend> DerefMut for FanAutoGuard<'_, B> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.ec
+    }
+}
+
+impl<B: EcBackend> Drop for FanAutoGuard<'_, B> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Best effort: cannot report an error from `drop`.
+            let _ = self.ec.set_fan_auto();
+        }
+    }
+}
+
 /// Step the fan through every manual level, recording the observed RPM.
 ///
 /// The fan is always handed back to the firmware (BIOS auto) before returning,
-/// even if a step fails, so a sweep can never leave the machine on a manual
-/// level.
+/// even if a step fails or the sweep is interrupted, so a sweep can never leave
+/// the machine on a manual level.
 fn run_sweep<B: EcBackend>(ec: &mut Ec<B>, settle: Duration, json: bool) -> Result<(), EcError> {
+    let mut guard = FanAutoGuard::new(ec);
+    interrupt::install();
     let mut points: Vec<SweepPoint> = Vec::new();
     let mut result = Ok(());
     for level in FAN_LEVEL_MIN..=FAN_LEVEL_MAX {
+        if interrupt::interrupted() {
+            eprintln!("sweep: interrupted; restoring BIOS auto control");
+            break;
+        }
         eprintln!("sweep: level {level}, settling for {settle:?}...");
-        if let Err(error) = ec.set_fan_level(level) {
+        if let Err(error) = guard.set_fan_level(level) {
             result = Err(error);
             break;
         }
-        std::thread::sleep(settle);
-        match ec.read_fan_rpm() {
+        if sleep_interruptible(settle) {
+            eprintln!("sweep: interrupted; restoring BIOS auto control");
+            break;
+        }
+        match guard.read_fan_rpm() {
             Ok(ec_rpm) => {
                 let acpi_rpm = thinkpad_acpi::read_fan_speed().ok();
                 points.push(SweepPoint {
@@ -224,7 +328,7 @@ fn run_sweep<B: EcBackend>(ec: &mut Ec<B>, settle: Duration, json: bool) -> Resu
     }
 
     // Safety: always restore BIOS auto control, regardless of the outcome.
-    if let Err(error) = ec.set_fan_auto() {
+    if let Err(error) = guard.restore() {
         eprintln!("error: failed to restore BIOS auto control: {error}");
         if result.is_ok() {
             result = Err(error);
@@ -287,4 +391,69 @@ fn format_sweep_json(points: &[SweepPoint]) -> String {
     }
     out.push_str("]\n}\n");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omafanctrl_core::ec::{EC_WINDOW_SIZE, FAN_BIOS_AUTO, REG_FAN_CONTROL};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct SharedBackend {
+        bytes: Arc<Mutex<[u8; EC_WINDOW_SIZE]>>,
+    }
+
+    impl SharedBackend {
+        fn new() -> (Self, Arc<Mutex<[u8; EC_WINDOW_SIZE]>>) {
+            let bytes = Arc::new(Mutex::new([0u8; EC_WINDOW_SIZE]));
+            (
+                Self {
+                    bytes: Arc::clone(&bytes),
+                },
+                bytes,
+            )
+        }
+    }
+
+    impl EcBackend for SharedBackend {
+        fn read_byte(&mut self, offset: usize) -> Result<u8, EcError> {
+            Ok(self.bytes.lock().unwrap()[offset])
+        }
+
+        fn write_byte(&mut self, offset: usize, value: u8) -> Result<(), EcError> {
+            self.bytes.lock().unwrap()[offset] = value;
+            Ok(())
+        }
+
+        fn read_window(&mut self) -> Result<[u8; EC_WINDOW_SIZE], EcError> {
+            Ok(*self.bytes.lock().unwrap())
+        }
+    }
+
+    #[test]
+    fn sweep_restores_bios_auto() {
+        let (backend, bytes) = SharedBackend::new();
+        let mut ec = Ec::new(backend).with_min_write_interval(Duration::ZERO);
+        run_sweep(&mut ec, Duration::ZERO, true).unwrap();
+        assert_eq!(
+            bytes.lock().unwrap()[usize::from(REG_FAN_CONTROL)],
+            FAN_BIOS_AUTO
+        );
+    }
+
+    #[test]
+    fn guard_restores_bios_auto_when_dropped() {
+        let (backend, bytes) = SharedBackend::new();
+        let mut ec = Ec::new(backend).with_min_write_interval(Duration::ZERO);
+        {
+            let mut guard = FanAutoGuard::new(&mut ec);
+            guard.set_fan_level(3).unwrap();
+            assert_eq!(bytes.lock().unwrap()[usize::from(REG_FAN_CONTROL)], 3);
+        }
+        assert_eq!(
+            bytes.lock().unwrap()[usize::from(REG_FAN_CONTROL)],
+            FAN_BIOS_AUTO
+        );
+    }
 }

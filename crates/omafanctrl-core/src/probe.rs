@@ -41,13 +41,16 @@ pub struct ProbeReport {
 impl ProbeReport {
     /// A human-readable description of the fan control register.
     ///
-    /// Bit 7 (`0x80`) means BIOS controlled; otherwise the low bits are the
-    /// manual level. See [`crate::ec::REG_FAN_CONTROL`].
+    /// Bit 7 (`0x80`) means BIOS controlled; `0x00` means the fan is off, and
+    /// the remaining low bits are the manual level. See
+    /// [`crate::ec::REG_FAN_CONTROL`].
     pub fn fan_control_description(&self) -> String {
         if self.fan_control & FAN_BIOS_AUTO != 0 {
             "BIOS controlled".to_string()
         } else if self.fan_control == FAN_DISENGAGED {
             "disengaged (unverified)".to_string()
+        } else if self.fan_control == 0 {
+            "off".to_string()
         } else if self.fan_control <= FAN_LEVEL_MAX {
             format!("manual level {}", self.fan_control)
         } else {
@@ -258,6 +261,21 @@ mod tests {
                 .any(|reading| reading.offset == 0x79)
         );
         assert_eq!(report.fan_control_description(), "manual level 3");
+    }
+
+    #[test]
+    fn reports_fan_off_as_off() {
+        let mut backend = MockBackend::default();
+        backend.bytes[usize::from(REG_FAN_CONTROL)] = 0;
+        let mut ec = Ec::new(backend);
+        let report = probe(&mut ec).unwrap();
+        assert_eq!(report.fan_control_description(), "off");
+
+        let text = format_report(&report);
+        assert!(text.contains("Fan control (0x2F): 0x00 — off"));
+        let json = format_json(&report);
+        assert!(json.contains("\"fan_control\": 0,"));
+        assert!(json.contains("\"fan_control_description\": \"off\","));
     }
 
     #[test]
