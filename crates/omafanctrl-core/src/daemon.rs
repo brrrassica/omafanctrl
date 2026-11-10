@@ -374,14 +374,19 @@ impl<B: EcBackend> Daemon<B> {
     /// Used by runtime settings such as `SetHysteresis`, whose values are
     /// documented as persisted in `[General]`. A write failure is logged rather
     /// than aborting the control loop; the live setting still applies.
-    fn persist_config(&self) {
-        if let Err(error) = std::fs::write(&self.config_path, self.config.to_ini()) {
+    fn persist_config(&mut self) {
+        let ini = self.config.to_ini();
+        if let Err(error) = std::fs::write(&self.config_path, &ini) {
             tracing::warn!(
                 %error,
                 path = %self.config_path.display(),
                 "failed to persist configuration; the live setting still applies"
             );
+            return;
         }
+        // Advance the watcher past our own write so the next poll does not
+        // treat it as an external edit and reset live runtime state.
+        self.watcher.note_written(&ini);
     }
 
     /// Publish a state snapshot for the D-Bus layer.
@@ -772,6 +777,33 @@ mod tests {
         assert!(!Config::from_file(&path).unwrap().general.hysteresis);
         daemon.handle_command(Command::ReloadConfig).unwrap();
         assert!(!daemon.engine().hysteresis_enabled());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn daemon_hysteresis_toggle_preserves_live_manual_level() {
+        let path = temp_path("hysteresis-manual-level");
+        std::fs::write(
+            &path,
+            "Active=3\nManFanSpeed=1\nHysteresis=1\nLevel=50 2 0 0\nLevel=60 3 0 0\n",
+        )
+        .unwrap();
+        let (backend, _bytes) = SharedBackend::new();
+        let config = Config::from_file(&path).unwrap();
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+
+        // Prime the watcher before changing the live runtime level.
+        daemon.tick(Instant::now()).unwrap();
+        daemon.handle_command(Command::SetManualLevel(5)).unwrap();
+        assert_eq!(daemon.engine().manual_level(), 5);
+
+        daemon
+            .handle_command(Command::SetHysteresis(false))
+            .unwrap();
+
+        // The daemon's own write must not look like an external config edit.
+        assert_eq!(daemon.engine().manual_level(), 5);
 
         std::fs::remove_file(&path).ok();
     }

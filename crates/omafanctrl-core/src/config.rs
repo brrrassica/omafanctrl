@@ -119,6 +119,10 @@ pub enum ValidationError {
     #[error("`ManFanSpeed` must be 0..=7, got {0}")]
     ManFanSpeedOutOfRange(u8),
 
+    /// `ManModeExit` was above the sane temperature range.
+    #[error("`ManModeExit` must be 0..=127 °C, got {0}")]
+    ManModeExitOutOfRange(u8),
+
     /// `IconLevels` did not contain exactly three temperatures.
     #[error("`IconLevels` must contain exactly {ICON_LEVEL_COUNT} temperatures, got {0}")]
     IconLevelCount(usize),
@@ -386,6 +390,11 @@ impl Config {
         if general.man_fan_speed > FAN_LEVEL_MAX {
             return Err(ValidationError::ManFanSpeedOutOfRange(
                 general.man_fan_speed,
+            ));
+        }
+        if general.man_mode_exit > TEMP_MAX_C {
+            return Err(ValidationError::ManModeExitOutOfRange(
+                general.man_mode_exit,
             ));
         }
         if general.icon_levels.len() != ICON_LEVEL_COUNT {
@@ -1081,6 +1090,15 @@ impl ConfigWatcher {
         self.last = Some(FileStamp::from_contents(&contents));
         Ok(config)
     }
+
+    /// Record contents the daemon has just written itself.
+    ///
+    /// This advances the fingerprint so the next [`ConfigWatcher::poll`] does
+    /// not mistake a daemon-originated write for an external edit and reload
+    /// the configuration over the live runtime state.
+    pub fn note_written(&mut self, contents: &str) {
+        self.last = Some(FileStamp::from_contents(contents));
+    }
 }
 
 #[cfg(test)]
@@ -1425,6 +1443,16 @@ Foo=bar
             error,
             ConfigError::Validation(ValidationError::CycleTooSmall(0))
         ));
+    }
+
+    #[test]
+    fn rejects_man_mode_exit_above_temperature_range() {
+        let error = "ManModeExit=128\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::ManModeExitOutOfRange(128))
+        ));
+        assert!("ManModeExit=127\n".parse::<Config>().is_ok());
     }
 
     #[test]
