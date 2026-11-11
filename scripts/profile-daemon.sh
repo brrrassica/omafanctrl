@@ -43,7 +43,7 @@ read_cpu_ticks() {
 }
 
 read_status_field() {
-  awk -v key="$1" '$1 == key {print $2}' "/proc/$DAEMON_PID/status"
+  awk -v key="$1" '$1 == key ":" {print $2}' "/proc/$DAEMON_PID/status"
 }
 
 HZ="$(getconf CLK_TCK)"
