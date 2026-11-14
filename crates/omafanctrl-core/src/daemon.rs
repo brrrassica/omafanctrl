@@ -21,7 +21,7 @@
 //!
 //! [`Decision`]: crate::engine::Decision
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
@@ -44,6 +44,16 @@ pub const COMMAND_CHANNEL_CAPACITY: usize = 16;
 /// 250 ms gives the GUI a 4 Hz temperature history while the control decision
 /// still runs at the configured interval.
 pub const TELEMETRY_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The event that woke the control loop.
+enum LoopEvent {
+    /// The telemetry ticker fired: publish a sample without evaluating control.
+    Telemetry,
+    /// The dedicated control deadline elapsed: evaluate the fan decision.
+    Control,
+    /// A command arrived from the D-Bus layer, or the channel closed.
+    Command(Option<Command>),
+}
 
 /// The daemon control loop.
 pub struct Daemon<B: EcBackend> {
@@ -266,6 +276,22 @@ impl<B: EcBackend> Daemon<B> {
                 self.persist_config();
                 let _ = self.config_tx.send(self.config.to_ini());
             }
+            Command::SetConfig(contents) => match contents.parse::<Config>() {
+                Ok(config) => {
+                    self.apply_config(config);
+                    // Write the exact document the caller sent, and advance the
+                    // watcher to the same text, so the next poll cannot mistake
+                    // this write for an external edit.
+                    self.write_config(&contents);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "ignoring invalid configuration from the control interface; \
+                         keeping the last good configuration"
+                    );
+                }
+            },
             Command::ReloadConfig => match Config::from_file(&self.config_path) {
                 Ok(config) => self.apply_config(config),
                 Err(error) => {
@@ -294,15 +320,19 @@ impl<B: EcBackend> Daemon<B> {
         interval: Option<Duration>,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), EngineError> {
-        // Sample and publish at the fast telemetry cadence; evaluate the fan
-        // control decision only once per control interval.
+        // Sample and publish at the telemetry cadence, but drive the fan
+        // control decision from its own deadline. Sharing one ticker made the
+        // effective control cadence `max(telemetry_interval, Cycle)`, so a long
+        // telemetry interval could starve control entirely.
         let mut ticker = tokio::time::interval(self.telemetry_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut last_control: Option<Instant> = None;
+        let mut next_control = Instant::now();
         loop {
-            let received = tokio::select! {
-                _ = ticker.tick() => None,
-                command = self.commands.recv() => Some(command),
+            let control_deadline = tokio::time::Instant::from_std(next_control);
+            let event = tokio::select! {
+                _ = ticker.tick() => LoopEvent::Telemetry,
+                _ = tokio::time::sleep_until(control_deadline) => LoopEvent::Control,
+                command = self.commands.recv() => LoopEvent::Command(command),
                 result = shutdown.changed() => {
                     if result.is_err() || *shutdown.borrow() {
                         break;
@@ -310,24 +340,18 @@ impl<B: EcBackend> Daemon<B> {
                     continue;
                 }
             };
-            match received {
-                None => {
+            match event {
+                LoopEvent::Telemetry => self.sample()?,
+                LoopEvent::Control => {
                     let now = Instant::now();
-                    let control_interval = self.control_interval(interval);
-                    let control_due = last_control
-                        .is_none_or(|last| now.saturating_duration_since(last) >= control_interval);
-                    if control_due {
-                        self.tick(now)?;
-                        last_control = Some(now);
-                    } else {
-                        self.sample()?;
-                    }
+                    self.tick(now)?;
+                    next_control = now + self.control_interval(interval);
                 }
-                Some(Some(command)) => {
+                LoopEvent::Command(Some(command)) => {
                     self.handle_command(command)?;
-                    last_control = Some(Instant::now());
+                    next_control = Instant::now() + self.control_interval(interval);
                 }
-                Some(None) => break,
+                LoopEvent::Command(None) => break,
             }
         }
         Ok(())
@@ -376,7 +400,17 @@ impl<B: EcBackend> Daemon<B> {
     /// than aborting the control loop; the live setting still applies.
     fn persist_config(&mut self) {
         let ini = self.config.to_ini();
-        if let Err(error) = std::fs::write(&self.config_path, &ini) {
+        self.write_config(&ini);
+    }
+
+    /// Write configuration text and record it with the watcher.
+    ///
+    /// This is the only writer of the configuration file: both runtime
+    /// persistence and `SetConfig` go through the control loop, so the two can
+    /// no longer clobber each other. The write is atomic, so a reader (or the
+    /// watcher) never observes a truncated document.
+    fn write_config(&mut self, contents: &str) {
+        if let Err(error) = write_config_atomic(&self.config_path, contents) {
             tracing::warn!(
                 %error,
                 path = %self.config_path.display(),
@@ -386,7 +420,7 @@ impl<B: EcBackend> Daemon<B> {
         }
         // Advance the watcher past our own write so the next poll does not
         // treat it as an external edit and reset live runtime state.
-        self.watcher.note_written(&ini);
+        self.watcher.note_written(contents);
     }
 
     /// Publish a state snapshot for the D-Bus layer.
@@ -410,6 +444,31 @@ impl<B: EcBackend> Daemon<B> {
         };
         let _ = self.state_tx.send(state);
     }
+}
+
+/// Write `contents` to `path` via a temporary file and an atomic rename.
+///
+/// The daemon loop is the single writer, so a per-process temporary name is
+/// sufficient. A failed rename removes the temporary file rather than leaving
+/// it behind.
+fn write_config_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "configuration path has no file name",
+        )
+    })?;
+    let mut temp_name = std::ffi::OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(format!(".tmp.{}", std::process::id()));
+    let temp_path = path.with_file_name(temp_name);
+
+    std::fs::write(&temp_path, contents)?;
+    if let Err(error) = std::fs::rename(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -819,6 +878,35 @@ mod tests {
     }
 
     #[test]
+    fn daemon_applies_and_persists_set_config() {
+        let path = temp_path("set-config");
+        std::fs::write(&path, "Active=1\nLevel=50 2 0 0\nLevel=60 3 0 0\n").unwrap();
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        let config = Config::from_file(&path).unwrap();
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+
+        daemon
+            .handle_command(Command::SetConfig(
+                "Active=2\nLevel=50 2 0 0\nLevel=60 3 0 0\n".to_string(),
+            ))
+            .unwrap();
+
+        // The new document is live, applied, and written verbatim to disk.
+        assert_eq!(daemon.config().general.active, 2);
+        assert_eq!(daemon.engine().mode(), Mode::Smart);
+        assert_eq!(control_register(&bytes), 3);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("Active=2"));
+
+        // The daemon's own write is not treated as an external edit.
+        daemon.handle_command(Command::ReloadConfig).unwrap();
+        assert_eq!(daemon.engine().mode(), Mode::Smart);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn daemon_hysteresis_toggle_preserves_live_manual_level() {
         let path = temp_path("hysteresis-manual-level");
         std::fs::write(
@@ -1024,5 +1112,54 @@ mod tests {
             daemon.control_interval(Some(Duration::from_secs(2))),
             Duration::from_secs(2)
         );
+    }
+
+    #[tokio::test]
+    async fn control_deadline_is_independent_of_the_telemetry_interval() {
+        let path = temp_path("run-control");
+        std::fs::write(&path, "Level=50 2 0 0\nLevel=60 3 0 0\n").unwrap();
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 50);
+        let config = Config::from_file(&path).unwrap();
+        let mut daemon = Daemon::new(ec(backend), config, path.clone())
+            // A telemetry interval far longer than the control interval must not
+            // delay a control decision.
+            .with_telemetry_interval(Duration::from_secs(5));
+        // Prime the watcher so the first control tick does not reload the
+        // configuration (and reset the test's dwell policy) underneath us.
+        daemon.tick(Instant::now()).unwrap();
+        let mut policy = daemon.engine().policy().clone();
+        policy.min_dwell = Duration::ZERO;
+        daemon.engine.set_policy(policy);
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let loop_task = tokio::spawn(async move {
+            daemon
+                .run(Some(Duration::from_millis(20)), shutdown_rx)
+                .await
+        });
+
+        let wait_for = |expected: u8| {
+            let bytes = Arc::clone(&bytes);
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while control_register(&bytes) != expected && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                control_register(&bytes)
+            }
+        };
+
+        // The first control tick runs immediately and selects level 2.
+        assert_eq!(wait_for(2).await, 2);
+
+        // A temperature change is picked up by the next control deadline even
+        // though the telemetry ticker will not fire for another five seconds.
+        set_byte(&bytes, 0x78, 60);
+        assert_eq!(wait_for(3).await, 3);
+
+        shutdown_tx.send(true).unwrap();
+        loop_task.await.unwrap().unwrap();
+        std::fs::remove_file(&path).ok();
     }
 }

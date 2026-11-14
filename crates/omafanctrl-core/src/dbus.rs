@@ -201,7 +201,7 @@ impl Default for State {
 }
 
 /// A command sent from the D-Bus layer to the control loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Switch the active mode.
     SetMode(Mode),
@@ -209,6 +209,8 @@ pub enum Command {
     SetManualLevel(u8),
     /// Enable or disable smart-mode hysteresis.
     SetHysteresis(bool),
+    /// Replace the live configuration with validated `.ini` text and persist it.
+    SetConfig(String),
     /// Re-read the configuration file from disk.
     ReloadConfig,
 }
@@ -312,20 +314,15 @@ impl ControlService {
         self.send(Command::SetHysteresis(enabled))
     }
 
-    /// Validate, persist, and apply new configuration text.
+    /// Validate and apply new configuration text.
     ///
-    /// The configuration is validated and a command-queue slot is reserved
-    /// before it is written, so an invalid document or a full queue never
-    /// reaches disk.
+    /// The document is validated here and then handed to the control loop,
+    /// which is the only writer of the configuration file. That serialises it
+    /// with runtime persistence (such as `SetHysteresis`) and lets the loop
+    /// write the file atomically.
     pub fn set_config(&self, contents: &str) -> Result<(), ServiceError> {
         let _validated: Config = contents.parse()?;
-        let permit = self.commands.try_reserve().map_err(channel_error)?;
-        std::fs::write(&self.config_path, contents).map_err(|source| ServiceError::Io {
-            path: self.config_path.clone(),
-            source,
-        })?;
-        permit.send(Command::ReloadConfig);
-        Ok(())
+        self.send(Command::SetConfig(contents.to_string()))
     }
 
     /// Re-read the configuration file from disk.
@@ -561,15 +558,21 @@ mod tests {
     }
 
     #[test]
-    fn set_config_writes_valid_documents() {
+    fn set_config_queues_the_document_for_the_control_loop() {
         let path =
             std::env::temp_dir().join(format!("omafanctrl-dbus-valid-{}.ini", std::process::id()));
-        let (service, _state_tx, _command_rx) = service(path.clone());
+        let (service, _state_tx, mut command_rx) = service(path.clone());
         service
             .set_config("Active=1\nLevel=50 2 0 0\n")
-            .expect("valid config should be written");
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(written.contains("Active=1"));
+            .expect("valid config should be queued");
+
+        // The D-Bus handler must not write the file itself; the control loop
+        // owns every configuration write.
+        assert!(!path.exists());
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            Command::SetConfig(contents) if contents.contains("Active=1")
+        ));
         std::fs::remove_file(&path).ok();
     }
 
