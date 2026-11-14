@@ -41,12 +41,15 @@ and that `ec_sys` is loaded with `write_support=1`.
 
 ## `EC device ... is not writable`
 
-The module was loaded without write support, or the process is not root. Reload
-the module and run the daemon as root:
+The module was loaded without write support, or the process is not root. Stop
+the daemon so it releases the EC window, reload the module, then start the
+daemon again and run it as root:
 
 ```sh
+sudo systemctl stop omafanctrld
 sudo modprobe -r ec_sys
 sudo modprobe ec_sys write_support=1
+sudo systemctl start omafanctrld
 ```
 
 ## `authorization denied` from the CLI

@@ -39,7 +39,7 @@ The installer:
 - verifies the platform and **refuses to run** on anything other than Omarchy 4
   on a ThinkPad;
 - installs the runtime dependencies (`gtk4`, `libadwaita`, `dbus`, `polkit`) and,
-  when no prebuilt binaries are present, the build dependencies
+  when building from a source checkout, the build dependencies
   (`base-devel`, `rust`, `pkgconf`, `git`);
 - installs the daemon, CLI, bar status module, GUI, and probe binaries;
 - installs the D-Bus policy, polkit action, systemd unit, `ec_sys` drop-ins,
