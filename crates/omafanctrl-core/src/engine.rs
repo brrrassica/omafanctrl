@@ -164,9 +164,11 @@ pub fn sensor_sequence(offset: u8) -> u8 {
 /// Unknown offsets are labelled `x<hex>` (for example `x7a`), matching the
 /// convention used by the shipped profile's ignore list.
 ///
-/// A failed register read is skipped so the remaining sensors are still
-/// returned, matching [`Ec::read_temperatures`]. An error is returned only when
-/// every requested sensor failed.
+/// A failed or implausible register read is skipped so the remaining sensors
+/// are still returned, matching [`Ec::read_temperatures`]. Values above
+/// [`TEMP_MAX_C`] and `0` are filtered out before they can be published; the
+/// latter mirrors the engine's `is_usable` filter. An error is returned only
+/// when every requested sensor read failed.
 pub fn read_sensor_readings<B: EcBackend>(
     ec: &mut Ec<B>,
     offsets: &[u8],
@@ -174,8 +176,10 @@ pub fn read_sensor_readings<B: EcBackend>(
     let mut readings = Vec::with_capacity(offsets.len());
     let mut last_error = None;
     for &offset in offsets {
-        match ec.read_byte(offset) {
-            Ok(celsius) => {
+        match ec.read_temperature(offset) {
+            // `0` marks an unavailable sensor in TPFanCtrl2, so it is not a
+            // real temperature and is excluded from published telemetry.
+            Ok(celsius) if celsius > 0 => {
                 let name = default_sensor_name(offset)
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("x{offset:02x}"));
@@ -185,6 +189,7 @@ pub fn read_sensor_readings<B: EcBackend>(
                     celsius,
                 });
             }
+            Ok(_) | Err(EcError::TemperatureOutOfRange { .. }) => {}
             Err(error) => last_error = Some(error),
         }
     }
@@ -1125,6 +1130,26 @@ Level=60 3 0 0
         let readings = read_sensor_readings(&mut ec, &[0x78, 0x7A]).unwrap();
         assert_eq!(readings[0], SensorReading::new(0x78, "cpu", 45));
         assert_eq!(readings[1], SensorReading::new(0x7A, "x7a", 50));
+    }
+
+    #[test]
+    fn read_sensor_readings_skips_implausible_values() {
+        let (backend, bytes) = SharedBackend::new();
+        bytes.lock().unwrap()[0x78] = 45;
+        // `0x80` is the BIOS-auto sentinel and a transient glitch value; it
+        // must never be published as a real 128 °C reading.
+        bytes.lock().unwrap()[0x79] = 0x80;
+        bytes.lock().unwrap()[0x7A] = 0;
+        bytes.lock().unwrap()[0x7B] = 60;
+        let mut ec = Ec::new(backend);
+        let readings = read_sensor_readings(&mut ec, &[0x78, 0x79, 0x7A, 0x7B]).unwrap();
+        assert_eq!(
+            readings,
+            vec![
+                SensorReading::new(0x78, "cpu", 45),
+                SensorReading::new(0x7B, "x7b", 60),
+            ]
+        );
     }
 
     #[test]
