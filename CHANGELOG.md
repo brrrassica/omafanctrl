@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Persisting a runtime setting no longer resets the live manual fan level.**
+  `persist_config` now records the exact text it wrote in `ConfigWatcher`, so the
+  next control tick does not mistake the daemon's own write for an external edit
+  and reload it. Previously, toggling hysteresis right after `SetManualLevel`
+  could drop the fan back to the `ManFanSpeed` value captured before the write.
+- **`ManModeExit` is validated against the 127 °C sensor ceiling.** A value above
+  it could never be reached, silently disabling the documented Manual-to-Smart
+  safety exit; the loader now rejects it with `ManModeExitOutOfRange`.
+- **`scripts/profile-daemon.sh` reports context switches and RSS again.** The
+  `/proc/<pid>/status` lookup now matches the colon-terminated keys
+  (`voluntary_ctxt_switches:`, `VmRSS:`), so the profile no longer prints blank
+  or zero values.
+
 ## [1.1.4] - 2026-11-04
 
 ### Fixed
