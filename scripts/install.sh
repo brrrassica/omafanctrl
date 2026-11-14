@@ -90,16 +90,17 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # The release zip ships prebuilt binaries in ./bin; a source checkout builds
-# them into ./target/release.
-if [[ -d "$ROOT_DIR/bin" && -x "$ROOT_DIR/bin/$DAEMON_BIN" ]]; then
-  BIN_DIR="$ROOT_DIR/bin"
-  PREBUILT=1
-elif [[ -d "$ROOT_DIR/target/release" && -x "$ROOT_DIR/target/release/$DAEMON_BIN" ]]; then
-  BIN_DIR="$ROOT_DIR/target/release"
-  PREBUILT=1
-else
+# them into ./target/release. A source checkout is recognised by Cargo.toml and
+# is always rebuilt, so re-running the installer never reuses stale binaries
+# that happen to already exist in ./target/release.
+if [[ -f "$ROOT_DIR/Cargo.toml" ]]; then
   BIN_DIR="$ROOT_DIR/target/release"
   PREBUILT=0
+elif [[ -x "$ROOT_DIR/bin/$DAEMON_BIN" ]]; then
+  BIN_DIR="$ROOT_DIR/bin"
+  PREBUILT=1
+else
+  die "found neither a release payload in $ROOT_DIR/bin nor a source checkout in $ROOT_DIR"
 fi
 
 DATA_DIR="$ROOT_DIR/data"
@@ -219,17 +220,17 @@ info "Installing runtime dependencies"
 install_packages gtk4 libadwaita dbus polkit
 
 if [[ "$PREBUILT" -eq 0 ]]; then
-  info "No prebuilt binaries found; building from source"
+  info "Building from the source checkout"
   install_packages base-devel rust pkgconf git
 fi
 
 # ---------------------------------------------------------------------------
-# Build (only when there are no prebuilt binaries)
+# Build from the source checkout
 # ---------------------------------------------------------------------------
 
 if [[ "$PREBUILT" -eq 0 ]]; then
   [[ -f "$ROOT_DIR/Cargo.toml" ]] \
-    || die "no prebuilt binaries and no Cargo.toml; run scripts/install.sh from the release zip or the source tree"
+    || die "source checkout is missing $ROOT_DIR/Cargo.toml"
   command -v cargo >/dev/null 2>&1 || die "cargo is not available after installing rust"
   info "Building the workspace (release)"
   ( cd "$ROOT_DIR" && cargo build --release --locked --workspace )
@@ -292,12 +293,48 @@ command -v gtk-update-icon-cache >/dev/null 2>&1 \
   && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# Load the EC module and start the daemon
+# Stop the daemon and reload the ec_sys module with write support
 # ---------------------------------------------------------------------------
 
-info "Loading the ec_sys kernel module with write support"
-modprobe -r ec_sys 2>/dev/null || true
-modprobe ec_sys write_support=1
+# True when the loaded module accepted write_support=1. Kernel bool parameters
+# read back as "Y"; accept the other common spellings too.
+ec_write_support_enabled() {
+  local value
+  value="$(cat /sys/module/ec_sys/parameters/write_support 2>/dev/null || true)"
+  case "$value" in
+    1|[Yy]|[Tt][Rr][Uu][Ee]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+reload_ec_sys() {
+  if [[ -d /sys/module/ec_sys ]]; then
+    # Do not hide an unload failure: a failed modprobe -r leaves the old
+    # module (and its parameters) in place, so the reload would be a no-op.
+    if ! modprobe -r ec_sys; then
+      if ec_write_support_enabled; then
+        warn "ec_sys is in use and cannot be unloaded; write support is already enabled, continuing without a reload"
+        return 0
+      fi
+      die "could not unload ec_sys; stop every process using /sys/kernel/debug/ec/ec0/io and re-run"
+    fi
+  fi
+  modprobe ec_sys write_support=1 \
+    || die "failed to load ec_sys with write support"
+  ec_write_support_enabled \
+    || die "ec_sys is loaded without write support; unload it and load it with write_support=1"
+}
+
+# The daemon keeps /sys/kernel/debug/ec/ec0/io open. Stop it first, otherwise
+# reloading the module underneath it invalidates the handle it still holds.
+info "Stopping omafanctrld before reloading the ec_sys module"
+systemctl stop omafanctrld 2>/dev/null || true
+if systemctl is-active --quiet omafanctrld; then
+  die "omafanctrld is still running; stop it before reloading ec_sys (systemctl stop omafanctrld)"
+fi
+
+info "Reloading the ec_sys kernel module with write support"
+reload_ec_sys
 if [[ -e /sys/kernel/debug/ec/ec0/io ]]; then
   ok "EC window is available at /sys/kernel/debug/ec/ec0/io"
 else

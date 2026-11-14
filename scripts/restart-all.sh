@@ -91,9 +91,45 @@ fi
 # Reload the ec_sys module with write support
 # ---------------------------------------------------------------------------
 
+# True when the loaded module accepted write_support=1. Kernel bool parameters
+# read back as "Y"; accept the other common spellings too.
+ec_write_support_enabled() {
+  local value
+  value="$(cat /sys/module/ec_sys/parameters/write_support 2>/dev/null || true)"
+  case "$value" in
+    1|[Yy]|[Tt][Rr][Uu][Ee]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+reload_ec_sys() {
+  if [[ -d /sys/module/ec_sys ]]; then
+    # Do not hide an unload failure: a failed modprobe -r leaves the old
+    # module (and its parameters) in place, so the reload would be a no-op.
+    if ! modprobe -r ec_sys; then
+      if ec_write_support_enabled; then
+        warn "ec_sys is in use and cannot be unloaded; write support is already enabled, continuing without a reload"
+        return 0
+      fi
+      die "could not unload ec_sys; stop every process using /sys/kernel/debug/ec/ec0/io and re-run"
+    fi
+  fi
+  modprobe ec_sys write_support=1 \
+    || die "failed to load ec_sys with write support"
+  ec_write_support_enabled \
+    || die "ec_sys is loaded without write support; unload it and load it with write_support=1"
+}
+
+# The daemon keeps /sys/kernel/debug/ec/ec0/io open. Stop it first, otherwise
+# reloading the module underneath it invalidates the handle it still holds.
+info "Stopping omafanctrld before reloading the ec_sys module"
+systemctl stop omafanctrld 2>/dev/null || true
+if systemctl is-active --quiet omafanctrld; then
+  die "omafanctrld is still running; stop it before reloading ec_sys (systemctl stop omafanctrld)"
+fi
+
 info "Reloading the ec_sys kernel module with write support"
-modprobe -r ec_sys 2>/dev/null || true
-modprobe ec_sys write_support=1
+reload_ec_sys
 if [[ -e /sys/kernel/debug/ec/ec0/io ]]; then
   ok "EC window is available at /sys/kernel/debug/ec/ec0/io"
 else
