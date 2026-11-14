@@ -266,7 +266,7 @@ impl<B: EcBackend> Daemon<B> {
                 self.persist_config();
                 let _ = self.config_tx.send(self.config.to_ini());
             }
-            Command::ReloadConfig => match Config::from_file(&self.config_path) {
+            Command::ReloadConfig => match self.watcher.reload() {
                 Ok(config) => self.apply_config(config),
                 Err(error) => {
                     tracing::warn!(
@@ -374,13 +374,22 @@ impl<B: EcBackend> Daemon<B> {
     /// Used by runtime settings such as `SetHysteresis`, whose values are
     /// documented as persisted in `[General]`. A write failure is logged rather
     /// than aborting the control loop; the live setting still applies.
-    fn persist_config(&self) {
-        if let Err(error) = std::fs::write(&self.config_path, self.config.to_ini()) {
-            tracing::warn!(
-                %error,
-                path = %self.config_path.display(),
-                "failed to persist configuration; the live setting still applies"
-            );
+    ///
+    /// A successful write updates the watcher's fingerprint, so the daemon does
+    /// not mistake its own write for an external edit on the next tick. Without
+    /// that, the reload would reset live runtime state (such as a manual level
+    /// set through `SetManualLevel`) to the values serialised here.
+    fn persist_config(&mut self) {
+        let contents = self.config.to_ini();
+        match std::fs::write(&self.config_path, &contents) {
+            Ok(()) => self.watcher.note_written(&contents),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %self.config_path.display(),
+                    "failed to persist configuration; the live setting still applies"
+                );
+            }
         }
     }
 
@@ -772,6 +781,41 @@ mod tests {
         assert!(!Config::from_file(&path).unwrap().general.hysteresis);
         daemon.handle_command(Command::ReloadConfig).unwrap();
         assert!(!daemon.engine().hysteresis_enabled());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn daemon_keeps_live_manual_level_after_persisting_hysteresis() {
+        let path = temp_path("hysteresis-manual-level");
+        std::fs::write(
+            &path,
+            "Active=3\nManFanSpeed=1\nHysteresis=1\nLevel=50 2 0 0\nLevel=60 3 0 0\n",
+        )
+        .unwrap();
+        let (backend, bytes) = SharedBackend::new();
+        let config = Config::from_file(&path).unwrap();
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+        assert_eq!(daemon.engine().mode(), Mode::Manual);
+        assert_eq!(daemon.engine().manual_level(), 1);
+
+        // Settle the watcher's initial poll so later ticks only react to real
+        // external edits.
+        daemon.tick(Instant::now()).unwrap();
+
+        // Raise the manual level at runtime; this is not written to the file.
+        daemon.handle_command(Command::SetManualLevel(5)).unwrap();
+        assert_eq!(control_register(&bytes), 5);
+
+        // Persisting the hysteresis toggle must not make the daemon reload its
+        // own write and reset the live manual level back to the file's value.
+        daemon
+            .handle_command(Command::SetHysteresis(false))
+            .unwrap();
+        daemon.tick(Instant::now()).unwrap();
+
+        assert_eq!(daemon.engine().manual_level(), 5);
+        assert_eq!(control_register(&bytes), 5);
 
         std::fs::remove_file(&path).ok();
     }

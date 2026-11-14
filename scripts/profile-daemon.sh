@@ -42,8 +42,10 @@ read_cpu_ticks() {
   awk '{print $14 + $15}' "/proc/$DAEMON_PID/stat"
 }
 
+# `/proc/<pid>/status` keys are colon-terminated (for example
+# `voluntary_ctxt_switches:` and `VmRSS:`), so compare against `key ":"`.
 read_status_field() {
-  awk -v key="$1" '$1 == key {print $2}' "/proc/$DAEMON_PID/status"
+  awk -v key="$1" '$1 == key ":" {print $2}' "/proc/$DAEMON_PID/status"
 }
 
 HZ="$(getconf CLK_TCK)"
