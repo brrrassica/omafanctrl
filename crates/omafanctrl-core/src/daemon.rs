@@ -415,7 +415,7 @@ impl<B: EcBackend> Daemon<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ec::{EC_WINDOW_SIZE, EcError, FAN_BIOS_AUTO, REG_FAN_CONTROL};
+    use crate::ec::{EC_WINDOW_SIZE, EcError, FAN_BIOS_AUTO, REG_FAN_CONTROL, TEMP_MAX_C};
     use crate::engine::Mode;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
@@ -741,6 +741,43 @@ mod tests {
                 .temperatures
                 .iter()
                 .any(|sensor| sensor.name == "cpu" && sensor.celsius == 60)
+        );
+    }
+
+    #[test]
+    fn sample_does_not_publish_implausible_temperatures() {
+        let (backend, bytes) = SharedBackend::new();
+        // 0x80 is the BIOS-auto sentinel / a transient glitch byte; it must not
+        // reach the D-Bus state as a 128 °C reading.
+        set_byte(&bytes, 0x78, 0x80);
+        set_byte(&bytes, 0x79, 55);
+        let mut daemon = Daemon::new(
+            ec(backend),
+            smart_config(),
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+        let mut state_rx = daemon.state_receiver();
+
+        daemon.sample().unwrap();
+
+        let state = state_rx.borrow_and_update().clone();
+        assert!(
+            state
+                .temperatures
+                .iter()
+                .all(|sensor| sensor.celsius <= TEMP_MAX_C)
+        );
+        assert!(
+            state
+                .temperatures
+                .iter()
+                .any(|sensor| sensor.name == "gpu" && sensor.celsius == 55)
+        );
+        assert!(
+            !state
+                .temperatures
+                .iter()
+                .any(|sensor| sensor.offset == 0x78)
         );
     }
 
