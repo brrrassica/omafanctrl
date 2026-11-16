@@ -167,12 +167,15 @@ pub fn sensor_sequence(offset: u8) -> u8 {
 /// A failed or implausible register read is skipped so the remaining sensors
 /// are still returned, matching [`Ec::read_temperatures`]. Values above
 /// [`TEMP_MAX_C`] and `0` are filtered out before they can be published; the
-/// latter mirrors the engine's `is_usable` filter. An error is returned only
+/// latter mirrors the engine's `is_usable` filter.
+///
+/// Returns the readings and the last EC read error encountered, if any offset
+/// could not be read due to an actual read failure. An error is returned only
 /// when every requested sensor read failed.
 pub fn read_sensor_readings<B: EcBackend>(
     ec: &mut Ec<B>,
     offsets: &[u8],
-) -> Result<Vec<SensorReading>, EcError> {
+) -> Result<(Vec<SensorReading>, Option<EcError>), EcError> {
     let mut readings = Vec::with_capacity(offsets.len());
     let mut last_error = None;
     for &offset in offsets {
@@ -193,9 +196,14 @@ pub fn read_sensor_readings<B: EcBackend>(
             Err(error) => last_error = Some(error),
         }
     }
-    match (readings.is_empty(), last_error) {
-        (true, Some(error)) => Err(error),
-        _ => Ok(readings),
+    if readings.is_empty() {
+        if let Some(error) = last_error {
+            Err(error)
+        } else {
+            Ok((readings, None))
+        }
+    } else {
+        Ok((readings, last_error))
     }
 }
 
@@ -1127,7 +1135,8 @@ Level=60 3 0 0
         bytes.lock().unwrap()[0x78] = 45;
         bytes.lock().unwrap()[0x7A] = 50;
         let mut ec = Ec::new(backend);
-        let readings = read_sensor_readings(&mut ec, &[0x78, 0x7A]).unwrap();
+        let (readings, read_error) = read_sensor_readings(&mut ec, &[0x78, 0x7A]).unwrap();
+        assert!(read_error.is_none());
         assert_eq!(readings[0], SensorReading::new(0x78, "cpu", 45));
         assert_eq!(readings[1], SensorReading::new(0x7A, "x7a", 50));
     }
@@ -1142,7 +1151,8 @@ Level=60 3 0 0
         bytes.lock().unwrap()[0x7A] = 0;
         bytes.lock().unwrap()[0x7B] = 60;
         let mut ec = Ec::new(backend);
-        let readings = read_sensor_readings(&mut ec, &[0x78, 0x79, 0x7A, 0x7B]).unwrap();
+        let (readings, read_error) = read_sensor_readings(&mut ec, &[0x78, 0x79, 0x7A, 0x7B]).unwrap();
+        assert!(read_error.is_none());
         assert_eq!(
             readings,
             vec![

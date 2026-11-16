@@ -158,21 +158,26 @@ impl<B: EcBackend> Daemon<B> {
 
     /// Read the sensor bank and the fan speed.
     ///
-    /// A failed sensor offset is skipped and filled from the last successful
-    /// sample, so a single bad sensor does not fail the batch. A failed
-    /// tachometer read keeps the last known RPM. `true` is returned when the
-    /// whole iteration failed (no sensor could be read, or the tachometer read
-    /// failed), so the control path can retain its last decision instead of
-    /// acting on stale data. After [`General::max_read_errors`] consecutive
-    /// failed iterations an error is returned so the daemon exits and the
-    /// watchdog reverts the fan.
+    /// A failed sensor offset is filled from the last successful sample when
+    /// available. Any sensor read that could not be refreshed (including a
+    /// partial read where some offsets failed) marks the iteration as failed,
+    /// so the control path can retain its last decision instead of acting on
+    /// incomplete or stale data. A failed tachometer read keeps the last known
+    /// RPM and also marks the iteration as failed. After
+    /// [`General::max_read_errors`] consecutive failed iterations an error is
+    /// returned so the daemon exits and the watchdog reverts the fan.
     ///
     /// [`General::max_read_errors`]: crate::config::General::max_read_errors
     fn read_sensors(&mut self) -> Result<(Vec<SensorReading>, u16, bool), EngineError> {
         let mut last_error = None;
         let (readings, sensors_failed) =
             match read_sensor_readings(self.watchdog.ec_mut(), &self.sensor_offsets) {
-                Ok(readings) => (readings, false),
+                Ok((readings, sensor_error)) => {
+                    if let Some(error) = sensor_error {
+                        last_error = Some(error);
+                    }
+                    (readings, last_error.is_some())
+                }
                 Err(error) => {
                     last_error = Some(error);
                     (Vec::new(), true)
@@ -934,7 +939,50 @@ mod tests {
     }
 
     #[test]
-    fn daemon_skips_a_failed_sensor_and_keeps_control_running() {
+    fn daemon_treats_partial_sensor_failure_as_failed_iteration() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        set_byte(&bytes, 0x79, 55);
+        let backend = FlakyBackend::new(backend);
+        let failures = Arc::clone(&backend.failing_offsets);
+        let mut daemon = Daemon::new(
+            ec(backend),
+            smart_config(),
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+
+        // Prime with a complete reading so control has a last commanded state.
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(control_register(&bytes), 3);
+        assert_eq!(daemon.read_errors, 0);
+
+        // A partial sensor read is treated as a failed iteration: telemetry keeps
+        // the last known value for the missing sensor, but control is not
+        // evaluated and read errors are counted.
+        failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(usize::from(0x79u8));
+        let prev_control = control_register(&bytes);
+        daemon.tick(Instant::now()).unwrap();
+        assert!(daemon.last_readings.iter().any(|s| s.name == "cpu"));
+        assert!(daemon.last_readings.iter().any(|s| s.name == "gpu"));
+        assert_eq!(daemon.read_errors, 1);
+        assert_eq!(control_register(&bytes), prev_control);
+
+        // Once the sensor recovers, a complete sample clears the error counter
+        // and control resumes normally.
+        failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(control_register(&bytes), 3);
+        assert_eq!(daemon.read_errors, 0);
+    }
+
+    #[test]
+    fn daemon_counts_persistent_partial_sensor_failures() {
         let (backend, bytes) = SharedBackend::new();
         set_byte(&bytes, 0x78, 60);
         set_byte(&bytes, 0x79, 55);
@@ -944,28 +992,19 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(usize::from(0x79u8));
+        let mut config = smart_config();
+        config.general.max_read_errors = 2;
         let mut daemon = Daemon::new(
             ec(backend),
-            smart_config(),
+            config,
             PathBuf::from("/nonexistent/omafanctrl.ini"),
         );
 
-        // The failed sensor is skipped; the other sensors are still read and
-        // the control loop stays alive.
-        daemon.tick(Instant::now()).unwrap();
-        assert!(daemon.last_readings.iter().any(|s| s.name == "cpu"));
-        assert!(!daemon.last_readings.iter().any(|s| s.name == "gpu"));
-        // A partial failure does not count against MaxReadErrors.
-        assert_eq!(daemon.read_errors, 0);
-
-        // Once the sensor recovers, control resumes and the error counter resets.
-        failures
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-        daemon.tick(Instant::now()).unwrap();
-        assert_eq!(control_register(&bytes), 3);
-        assert_eq!(daemon.read_errors, 0);
+        // A chronically unreadable sensor must count toward MaxReadErrors so the
+        // watchdog can revert instead of masking it indefinitely.
+        assert!(daemon.tick(Instant::now()).is_ok());
+        assert!(daemon.sample().is_ok());
+        assert!(daemon.tick(Instant::now()).is_err());
     }
 
     #[test]
