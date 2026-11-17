@@ -119,8 +119,9 @@ pub enum ValidationError {
     #[error("`ManFanSpeed` must be 0..=7, got {0}")]
     ManFanSpeedOutOfRange(u8),
 
-    /// `ManModeExit` was above the sane temperature range.
-    #[error("`ManModeExit` must be 0..=127 °C, got {0}")]
+    /// `ManModeExit` exceeded the sensor ceiling, making the Manual-mode safety
+    /// exit unreachable.
+    #[error("`ManModeExit` must be 0..={TEMP_MAX_C} °C, got {0}")]
     ManModeExitOutOfRange(u8),
 
     /// `IconLevels` did not contain exactly three temperatures.
@@ -392,6 +393,9 @@ impl Config {
                 general.man_fan_speed,
             ));
         }
+        // Usable sensor readings are capped at `TEMP_MAX_C`, so an exit
+        // threshold above it could never be reached and would silently disable
+        // the Manual-mode safety exit.
         if general.man_mode_exit > TEMP_MAX_C {
             return Err(ValidationError::ManModeExitOutOfRange(
                 general.man_mode_exit,
@@ -1080,6 +1084,16 @@ impl ConfigWatcher {
         Ok(Some(config))
     }
 
+    /// Record contents the daemon itself wrote to the watched path.
+    ///
+    /// Without this, the next [`ConfigWatcher::poll`] would see the daemon's
+    /// own write as an external edit, reload the file, and overwrite live
+    /// runtime state (such as the manual fan level) with values that were
+    /// captured before that write.
+    pub fn note_written(&mut self, contents: &str) {
+        self.last = Some(FileStamp::from_contents(contents));
+    }
+
     /// Force a reload regardless of whether the contents changed.
     pub fn reload(&mut self) -> Result<Config, ConfigError> {
         let contents = std::fs::read_to_string(&self.path).map_err(|source| ConfigError::Io {
@@ -1091,14 +1105,6 @@ impl ConfigWatcher {
         Ok(config)
     }
 
-    /// Record contents the daemon has just written itself.
-    ///
-    /// This advances the fingerprint so the next [`ConfigWatcher::poll`] does
-    /// not mistake a daemon-originated write for an external edit and reload
-    /// the configuration over the live runtime state.
-    pub fn note_written(&mut self, contents: &str) {
-        self.last = Some(FileStamp::from_contents(contents));
-    }
 }
 
 #[cfg(test)]
@@ -1490,6 +1496,42 @@ Foo=bar
             error,
             ConfigError::Validation(ValidationError::SmartFanLevelOutOfRange { mode: 1, level: 9 })
         ));
+    }
+
+    #[test]
+    fn accepts_man_mode_exit_at_the_sensor_ceiling() {
+        let config: Config = "ManModeExit=127\n".parse().unwrap();
+        assert_eq!(config.general.man_mode_exit, TEMP_MAX_C);
+    }
+
+    #[test]
+    fn rejects_man_mode_exit_above_the_sensor_ceiling() {
+        let error = "ManModeExit=128\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::ManModeExitOutOfRange(128))
+        ));
+    }
+
+    #[test]
+    fn watcher_ignores_its_own_write() {
+        let path = temp_path("note-written");
+        std::fs::write(&path, "Active=3\nManFanSpeed=1\n").unwrap();
+        let mut watcher = ConfigWatcher::new(path.clone());
+        let config = watcher
+            .poll()
+            .unwrap()
+            .expect("first poll reports a change");
+        assert_eq!(config.general.man_fan_speed, 1);
+
+        let contents = config.to_ini();
+        std::fs::write(&path, &contents).unwrap();
+        watcher.note_written(&contents);
+
+        // The daemon's own write must not be reported as an external edit.
+        assert!(watcher.poll().unwrap().is_none());
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
