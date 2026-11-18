@@ -172,6 +172,7 @@ mod tests {
     fn sample_state() -> State {
         State {
             mode: "smart".to_string(),
+            active_smart_profile: 1,
             manual_level: 2,
             current_level: 3,
             bios_auto: false,

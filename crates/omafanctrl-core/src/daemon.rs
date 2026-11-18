@@ -31,7 +31,7 @@ use crate::dbus::{Command, ControlService, SensorState, State};
 use crate::ec::{Ec, EcBackend, EcError};
 use crate::engine::{
     Engine, EngineError, EnginePolicy, Mode, SensorReading, Watchdog, apply_decision,
-    read_sensor_readings,
+    preferred_smart_slot, read_sensor_readings,
 };
 use crate::probe::KNOWN_SENSOR_OFFSETS;
 
@@ -82,9 +82,10 @@ impl<B: EcBackend> Daemon<B> {
     pub fn new(ec: Ec<B>, config: Config, config_path: PathBuf) -> Self {
         let mut engine = Engine::new(EnginePolicy::from_config(&config));
         // Start in the mode selected by the configuration's `Active` value
-        // (0 = BIOS, 1/2 = Smart, 3 = Manual). The default configuration uses
-        // Smart, so a fresh install boots into smart control rather than BIOS.
+        // (0 = BIOS, 1 = Smart 1, 2 = Smart 2, 3 = Manual). The default
+        // configuration uses Smart, so a fresh install boots into smart control.
         engine.set_mode(Mode::from_active(config.general.active));
+        engine.set_active_smart_profile(preferred_smart_slot(config.general.active));
         // Apply the configured manual level so a configuration that starts in
         // Manual mode commands `ManFanSpeed` rather than the safety floor.
         engine.set_manual_level(config.general.man_fan_speed);
@@ -273,7 +274,14 @@ impl<B: EcBackend> Daemon<B> {
     /// Apply a command from the D-Bus layer, then re-evaluate immediately.
     pub fn handle_command(&mut self, command: Command) -> Result<(), EngineError> {
         match command {
-            Command::SetMode(mode) => self.engine.set_mode(mode),
+            Command::SetMode(mode) => {
+                self.engine.set_mode(mode);
+                if mode == Mode::Smart {
+                    self.engine.set_active_smart_profile(preferred_smart_slot(
+                        self.config.general.active,
+                    ));
+                }
+            }
             Command::SetManualLevel(level) => self.engine.set_manual_level(level),
             Command::SetHysteresis(enabled) => {
                 self.config.general.hysteresis = enabled;
@@ -392,6 +400,9 @@ impl<B: EcBackend> Daemon<B> {
         // Keep the engine's manual level in sync with the reloaded file; the
         // setter clamps to the safety floor/ceiling.
         self.engine.set_manual_level(config.general.man_fan_speed);
+        self.engine.set_mode(Mode::from_active(config.general.active));
+        self.engine
+            .set_active_smart_profile(preferred_smart_slot(config.general.active));
         self.engine.reset();
         let ini = config.to_ini();
         self.config = config;
@@ -432,6 +443,7 @@ impl<B: EcBackend> Daemon<B> {
     fn publish_state(&self, readings: &[SensorReading], fan_rpm: u16) {
         let state = State {
             mode: self.engine.mode().as_str().to_string(),
+            active_smart_profile: self.engine.active_smart_profile(),
             manual_level: self.engine.manual_level(),
             current_level: self.engine.current_level().unwrap_or(0),
             bios_auto: self.engine.current_level().is_none(),
