@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.5] - 2026-11-18
 
 ### Fixed
 
@@ -80,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration is kept, and a genuinely fatal loop error now exits the daemon
   non-zero so systemd can restart it.
 
+[1.1.5]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.5
 [1.1.4]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.4
 [1.1.3]: https://github.com/omafanctrl/omafanctrl/releases/tag/v1.1.3
 
