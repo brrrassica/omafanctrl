@@ -169,6 +169,10 @@ pub struct SensorState {
 pub struct State {
     /// The active mode: `bios`, `manual`, or `smart`.
     pub mode: String,
+    /// The active smart-mode profile slot (1 or 2).
+    ///
+    /// This identifies which smart curve is selected when in smart mode.
+    pub active_smart_profile: u8,
     /// The configured manual fan level.
     pub manual_level: u8,
     /// The last commanded fan level (`0` when the fan is under BIOS control).
@@ -189,6 +193,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             mode: Mode::Bios.as_str().to_string(),
+            active_smart_profile: 1,
             manual_level: 1,
             current_level: 0,
             bios_auto: true,

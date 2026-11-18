@@ -344,14 +344,27 @@ pub struct SmartLevel {
 }
 
 /// The `[SmartMode]` section.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmartMode {
+    /// The smart-mode slot: 1 for `[SmartMode]`, 2 for `[SmartMode2]`.
+    pub slot: u8,
     /// The optional menu label (TPFanCtrl2 `MenuLabelSM1`).
     pub label: Option<String>,
     /// The temperature thresholds, in declaration order.
     pub levels: Vec<SmartLevel>,
     /// Unrecognised keys, preserved for round-tripping.
     pub extra: BTreeMap<String, String>,
+}
+
+impl Default for SmartMode {
+    fn default() -> Self {
+        Self {
+            slot: 1,
+            label: None,
+            levels: Vec::new(),
+            extra: BTreeMap::new(),
+        }
+    }
 }
 
 /// A fully parsed and validated configuration.
@@ -430,8 +443,8 @@ impl Config {
         if self.smart_modes.len() > MAX_SMART_MODES {
             return Err(ValidationError::TooManySmartModes(self.smart_modes.len()));
         }
-        for (index, mode) in self.smart_modes.iter().enumerate() {
-            let mode_number = index + 1;
+        for mode in &self.smart_modes {
+            let mode_number = usize::from(mode.slot);
             if mode.levels.is_empty() {
                 return Err(ValidationError::SmartModeEmpty { mode: mode_number });
             }
@@ -559,11 +572,10 @@ impl Config {
             out.push_str(&format!("{key}={value}\n"));
         }
 
-        for (index, mode) in self.smart_modes.iter().enumerate() {
-            let header = if index == 0 {
-                "[SmartMode]"
-            } else {
-                "[SmartMode2]"
+        for mode in &self.smart_modes {
+            let header = match mode.slot {
+                2 => "[SmartMode2]",
+                _ => "[SmartMode]",
             };
             out.push_str(&format!("\n{header}\n"));
             if let Some(label) = &mode.label {
@@ -870,8 +882,11 @@ fn build_smart_modes(
     map: BTreeMap<u8, Vec<(String, String, usize)>>,
 ) -> Result<Vec<SmartMode>, ConfigError> {
     let mut modes = Vec::new();
-    for entries in map.into_values() {
-        let mut mode = SmartMode::default();
+    for (slot, entries) in map {
+        let mut mode = SmartMode {
+            slot,
+            ..SmartMode::default()
+        };
         let mut extra = BTreeMap::new();
         for (key, value, line) in entries {
             match key.as_str() {

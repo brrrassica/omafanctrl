@@ -77,9 +77,8 @@ impl Mode {
 
     /// Map a TPFanCtrl2 `Active` value to a startup mode.
     ///
-    /// `0` = BIOS, `1`/`2` = Smart (the engine implements a single smart mode),
-    /// and `3` = Manual. Any other value falls back to [`Mode::Smart`], the
-    /// default startup mode.
+    /// `0` = BIOS, `1`/`2` = Smart, and `3` = Manual. Any other value falls back
+    /// to [`Mode::Smart`], the default startup mode.
     pub fn from_active(active: u8) -> Self {
         match active {
             0 => Mode::Bios,
@@ -87,6 +86,13 @@ impl Mode {
             _ => Mode::Smart,
         }
     }
+}
+
+/// The preferred smart-mode slot for a TPFanCtrl2 `Active` value.
+///
+/// `Active=2` selects Smart 2; all other values default to Smart 1.
+pub fn preferred_smart_slot(active: u8) -> u8 {
+    if active == 2 { 2 } else { 1 }
 }
 
 /// A named temperature reading from a single sensor.
@@ -250,13 +256,19 @@ impl Default for EnginePolicy {
 impl EnginePolicy {
     /// Build a policy from a parsed [`Config`].
     ///
-    /// The first smart mode supplies the thresholds, the `[Sensors]` ignore list
-    /// is carried over, and the `Hysteresis` general option controls whether
+    /// The smart-mode thresholds are taken from the smart profile selected by
+    /// `[General] Active` (1 = Smart 1, 2 = Smart 2), falling back to Smart 1 and
+    /// then to the first available smart mode. The `[Sensors]` ignore list is
+    /// carried over, and the `Hysteresis` general option controls whether
     /// hysteresis is applied.
     pub fn from_config(config: &Config) -> Self {
+        let preferred_slot = preferred_smart_slot(config.general.active);
         let smart_levels = config
             .smart_modes
-            .first()
+            .iter()
+            .find(|mode| mode.slot == preferred_slot)
+            .or_else(|| config.smart_modes.iter().find(|mode| mode.slot == 1))
+            .or_else(|| config.smart_modes.first())
             .map(|mode| mode.levels.clone())
             .unwrap_or_default();
         Self {
@@ -285,6 +297,7 @@ pub enum Decision {
 pub struct Engine {
     policy: EnginePolicy,
     mode: Mode,
+    active_smart_profile: u8,
     manual_level: u8,
     current_level: Option<u8>,
     last_change: Option<Instant>,
@@ -296,6 +309,7 @@ impl Engine {
         Self {
             policy,
             mode: Mode::Bios,
+            active_smart_profile: 1,
             manual_level: DEFAULT_SAFETY_FLOOR,
             current_level: None,
             last_change: None,
@@ -312,6 +326,18 @@ impl Engine {
     /// The change takes effect on the next [`Engine::evaluate`].
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
+    }
+
+    /// The active smart-mode profile slot (1 or 2).
+    ///
+    /// This selects which smart curve is used while in [`Mode::Smart`].
+    pub fn active_smart_profile(&self) -> u8 {
+        self.active_smart_profile
+    }
+
+    /// Set the active smart-mode profile slot (clamped to 1 or 2).
+    pub fn set_active_smart_profile(&mut self, profile: u8) {
+        self.active_smart_profile = if profile == 2 { 2 } else { 1 };
     }
 
     /// The manual fan level applied in [`Mode::Manual`].

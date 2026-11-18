@@ -49,6 +49,7 @@ impl CurvePage {
                 match config.smart_modes.first_mut() {
                     Some(mode) => mode.levels = levels,
                     None => config.smart_modes.push(SmartMode {
+                        slot: 1,
                         label: None,
                         levels,
                         extra: Default::default(),
