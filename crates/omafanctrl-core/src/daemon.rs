@@ -89,7 +89,15 @@ impl<B: EcBackend> Daemon<B> {
         // Apply the configured manual level so a configuration that starts in
         // Manual mode commands `ManFanSpeed` rather than the safety floor.
         engine.set_manual_level(config.general.man_fan_speed);
-        let watcher = ConfigWatcher::new(config_path.clone());
+        let mut watcher = ConfigWatcher::new(config_path.clone());
+        // Prime the watcher with the on-disk contents when they match the loaded
+        // configuration, so the first control tick does not treat startup as an
+        // external edit and spuriously reload/reset the engine.
+        if let Ok(contents) = std::fs::read_to_string(&config_path) {
+            if contents.parse::<Config>().ok().as_ref() == Some(&config) {
+                watcher.note_written(&contents);
+            }
+        }
         let (state_tx, _state_rx) = watch::channel(State::default());
         let (config_tx, _config_rx) = watch::channel(config.to_ini());
         let (command_tx, commands) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
@@ -281,8 +289,16 @@ impl<B: EcBackend> Daemon<B> {
                         self.config.general.active,
                     ));
                 }
+                self.config.general.active = match mode {
+                    Mode::Bios => 0,
+                    Mode::Manual => 3,
+                    Mode::Smart => self.engine.active_smart_profile(),
+                };
             }
-            Command::SetManualLevel(level) => self.engine.set_manual_level(level),
+            Command::SetManualLevel(level) => {
+                self.engine.set_manual_level(level);
+                self.config.general.man_fan_speed = self.engine.manual_level();
+            }
             Command::SetHysteresis(enabled) => {
                 self.config.general.hysteresis = enabled;
                 self.engine.set_hysteresis_enabled(enabled);
@@ -651,6 +667,27 @@ mod tests {
     }
 
     #[test]
+    fn first_tick_does_not_spuriously_reload_unchanged_config() {
+        let path = temp_path("startup-no-spurious-reload");
+        std::fs::write(&path, "Level=50 2 0 0\nLevel=60 3 0 0\n").unwrap();
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        let config = Config::from_file(&path).unwrap();
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+        let mut config_rx = daemon.config_receiver();
+        let _ = config_rx.borrow_and_update();
+
+        daemon.tick(Instant::now()).unwrap();
+
+        assert!(
+            !config_rx.has_changed().unwrap_or(false),
+            "first tick must not treat startup config as an external reload"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn daemon_honours_active_bios() {
         let (backend, _bytes) = SharedBackend::new();
         let config: Config = "Active=0\nLevel=50 2 0 0\nLevel=60 3 0 0\n"
@@ -890,6 +927,34 @@ mod tests {
         assert!(!Config::from_file(&path).unwrap().general.hysteresis);
         daemon.handle_command(Command::ReloadConfig).unwrap();
         assert!(!daemon.engine().hysteresis_enabled());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn daemon_persists_current_mode_and_manual_level_on_hysteresis_toggle() {
+        let path = temp_path("persist-runtime-state");
+        std::fs::write(
+            &path,
+            "Active=2\nManFanSpeed=1\nHysteresis=1\nLevel=50 2 0 0\nLevel=60 3 0 0\n",
+        )
+        .unwrap();
+        let (backend, _bytes) = SharedBackend::new();
+        let config = Config::from_file(&path).unwrap();
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+
+        daemon.handle_command(Command::SetManualLevel(5)).unwrap();
+        daemon
+            .handle_command(Command::SetMode(Mode::Manual))
+            .unwrap();
+        daemon
+            .handle_command(Command::SetHysteresis(false))
+            .unwrap();
+
+        let persisted = Config::from_file(&path).unwrap();
+        assert_eq!(persisted.general.active, 3);
+        assert_eq!(persisted.general.man_fan_speed, 5);
+        assert!(!persisted.general.hysteresis);
 
         std::fs::remove_file(&path).ok();
     }
