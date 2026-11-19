@@ -464,7 +464,16 @@ impl<B: EcBackend> Daemon<B> {
     }
 
     /// Adopt a new configuration and reset the engine so it takes effect.
+    ///
+    /// When the loaded configuration is identical to the live one (an explicit
+    /// `ReloadConfig` of an unchanged file, or a watcher re-read of the same
+    /// contents), the engine is left untouched: a reload must not cause a
+    /// redundant reset that clears dwell/anti-oscillation state.
     fn apply_config(&mut self, config: Config) {
+        if config == self.config {
+            tracing::debug!("configuration unchanged; skipping engine reset");
+            return;
+        }
         self.engine.set_policy(EnginePolicy::from_config(&config));
         // Keep the engine's manual level in sync with the reloaded file; the
         // setter clamps to the safety floor/ceiling.
