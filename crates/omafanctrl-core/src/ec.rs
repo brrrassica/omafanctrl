@@ -210,6 +210,15 @@ pub enum EcError {
         value: u8,
     },
 
+    /// A temperature sensor that had returned plausible readings stopped doing
+    /// so (it now returns the unavailable `0` or an implausible value), so
+    /// only stale cached data remains for it.
+    #[error("temperature sensor 0x{offset:02X} stopped returning a plausible reading")]
+    SensorUnplausible {
+        /// The sensor register offset.
+        offset: u8,
+    },
+
     /// A write was rejected because the rate limit has not elapsed.
     #[error("EC write rate limit active; retry in {retry_after:?}")]
     RateLimited {

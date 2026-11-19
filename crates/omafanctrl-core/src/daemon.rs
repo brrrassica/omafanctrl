@@ -179,19 +179,22 @@ impl<B: EcBackend> Daemon<B> {
     /// [`General::max_read_errors`]: crate::config::General::max_read_errors
     fn read_sensors(&mut self) -> Result<(Vec<SensorReading>, u16, bool), EngineError> {
         let mut last_error = None;
-        let (readings, sensors_failed) =
-            match read_sensor_readings(self.watchdog.ec_mut(), &self.sensor_offsets) {
-                Ok((readings, sensor_error)) => {
-                    if let Some(error) = sensor_error {
-                        last_error = Some(error);
-                    }
-                    (readings, last_error.is_some())
-                }
-                Err(error) => {
+        let (readings, sensors_failed) = match read_sensor_readings(
+            self.watchdog.ec_mut(),
+            &self.sensor_offsets,
+            &self.last_readings,
+        ) {
+            Ok((readings, sensor_error)) => {
+                if let Some(error) = sensor_error {
                     last_error = Some(error);
-                    (Vec::new(), true)
                 }
-            };
+                (readings, last_error.is_some())
+            }
+            Err(error) => {
+                last_error = Some(error);
+                (Vec::new(), true)
+            }
+        };
         let (fan_rpm, fan_failed) = match self.watchdog.ec_mut().read_fan_rpm() {
             Ok(fan_rpm) => (fan_rpm, false),
             Err(error) => {
@@ -250,7 +253,16 @@ impl<B: EcBackend> Daemon<B> {
             self.publish_state(&readings, fan_rpm);
             return Ok(());
         }
-        self.engine.exit_manual_if_hot(&readings);
+        if self.engine.exit_manual_if_hot(&readings) {
+            // The thermal safety exit took over from Manual, so mirror the
+            // `SetMode` bookkeeping: record the new mode in the live config
+            // and persist it. Otherwise any later `persist_config` (for
+            // example `SetHysteresis`) would write `Active=3` to disk and a
+            // restart would silently boot back into the unsafe Manual mode.
+            self.config.general.active = self.engine.active_smart_profile();
+            self.persist_config();
+            let _ = self.config_tx.send(self.config.to_ini());
+        }
         let decision = self.engine.decide(&readings, now);
         match apply_decision(self.watchdog.ec_mut(), decision) {
             Ok(()) => self.engine.commit(decision, now),
@@ -835,6 +847,37 @@ mod tests {
 
         assert_eq!(daemon.engine().mode(), Mode::Smart);
         assert_eq!(control_register(&bytes), 2);
+        // The automatic safety exit must update the live config like `SetMode`
+        // does, so a later persist does not write the stale Manual `Active=3`.
+        assert_eq!(daemon.config().general.active, 1);
+    }
+
+    #[test]
+    fn daemon_persists_manual_exit_as_smart() {
+        let path = temp_path("persist-manual-exit");
+        std::fs::write(
+            &path,
+            "Active=3\nManFanSpeed=1\nManModeExit=40\nHysteresis=1\nLevel=50 2 0 0\nLevel=60 3 0 0\n",
+        )
+        .unwrap();
+        let config = Config::from_file(&path).unwrap();
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 50);
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(daemon.engine().mode(), Mode::Smart);
+
+        // A later, unrelated persisted setting must capture the safety exit,
+        // not resurrect the stale `Active=3` Manual mode on the next restart.
+        daemon
+            .handle_command(Command::SetHysteresis(false))
+            .unwrap();
+        let persisted = Config::from_file(&path).unwrap();
+        assert_eq!(persisted.general.active, 1);
+        assert!(!persisted.general.hysteresis);
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -1128,6 +1171,33 @@ mod tests {
 
         // Two consecutive failed iterations are tolerated, then the daemon
         // reports an error so the watchdog can take over.
+        assert!(daemon.tick(Instant::now()).is_ok());
+        assert!(daemon.sample().is_ok());
+        assert!(daemon.tick(Instant::now()).is_err());
+    }
+
+    #[test]
+    fn daemon_counts_stuck_implausible_sensor_toward_max_read_errors() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        set_byte(&bytes, 0x79, 55);
+        let mut config = smart_config();
+        config.general.max_read_errors = 2;
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+
+        // Prime with complete, plausible readings.
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(daemon.read_errors, 0);
+
+        // The GPU sensor stops returning a plausible reading (stuck at 0): the
+        // iteration must count as failed even though the register read itself
+        // succeeds, so MaxReadErrors eventually fires instead of the stale
+        // cached value masking the fault forever.
+        set_byte(&bytes, 0x79, 0);
         assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.sample().is_ok());
         assert!(daemon.tick(Instant::now()).is_err());

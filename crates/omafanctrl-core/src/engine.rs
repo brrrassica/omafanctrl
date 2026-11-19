@@ -175,19 +175,31 @@ pub fn sensor_sequence(offset: u8) -> u8 {
 /// [`TEMP_MAX_C`] and `0` are filtered out before they can be published; the
 /// latter mirrors the engine's `is_usable` filter.
 ///
-/// Returns the readings and the last EC read error encountered, if any offset
-/// could not be read due to an actual read failure. An error is returned only
-/// when every requested sensor read failed.
+/// Returns the readings and an error describing why an offset could not be
+/// refreshed: a genuine EC read failure, or — for an offset that previously
+/// produced a plausible reading (see `prev_readings`) — a
+/// [`EcError::SensorUnplausible`] marker when it now returns `0` or an
+/// implausible value. The error is surfaced so the caller can treat the
+/// iteration as failed instead of silently acting on stale cached data.
+/// An offset that has never been plausible (for example an unpopulated
+/// register reading `0`) stays excluded without an error, matching
+/// TPFanCtrl2.
 pub fn read_sensor_readings<B: EcBackend>(
     ec: &mut Ec<B>,
     offsets: &[u8],
+    prev_readings: &[SensorReading],
 ) -> Result<(Vec<SensorReading>, Option<EcError>), EcError> {
     let mut readings = Vec::with_capacity(offsets.len());
     let mut last_error = None;
     for &offset in offsets {
+        // `0` marks an unavailable sensor in TPFanCtrl2, so it is not a
+        // real temperature and is excluded from published telemetry. But a
+        // sensor that *was* plausible and now reads `0` (or an implausible
+        // value) can no longer be refreshed: report it so the caller counts
+        // the iteration as failed instead of backfilling the cache forever
+        // and hiding a stuck sensor from `MaxReadErrors`.
+        let was_plausible = prev_readings.iter().any(|r| r.offset == offset);
         match ec.read_temperature(offset) {
-            // `0` marks an unavailable sensor in TPFanCtrl2, so it is not a
-            // real temperature and is excluded from published telemetry.
             Ok(celsius) if celsius > 0 => {
                 let name = default_sensor_name(offset)
                     .map(str::to_string)
@@ -198,7 +210,16 @@ pub fn read_sensor_readings<B: EcBackend>(
                     celsius,
                 });
             }
-            Ok(_) | Err(EcError::TemperatureOutOfRange { .. }) => {}
+            Ok(_) => {
+                if was_plausible {
+                    last_error = Some(EcError::SensorUnplausible { offset });
+                }
+            }
+            Err(error @ EcError::TemperatureOutOfRange { .. }) => {
+                if was_plausible {
+                    last_error = Some(error);
+                }
+            }
             Err(error) => last_error = Some(error),
         }
     }
@@ -1161,7 +1182,7 @@ Level=60 3 0 0
         bytes.lock().unwrap()[0x78] = 45;
         bytes.lock().unwrap()[0x7A] = 50;
         let mut ec = Ec::new(backend);
-        let (readings, read_error) = read_sensor_readings(&mut ec, &[0x78, 0x7A]).unwrap();
+        let (readings, read_error) = read_sensor_readings(&mut ec, &[0x78, 0x7A], &[]).unwrap();
         assert!(read_error.is_none());
         assert_eq!(readings[0], SensorReading::new(0x78, "cpu", 45));
         assert_eq!(readings[1], SensorReading::new(0x7A, "x7a", 50));
@@ -1177,8 +1198,63 @@ Level=60 3 0 0
         bytes.lock().unwrap()[0x7A] = 0;
         bytes.lock().unwrap()[0x7B] = 60;
         let mut ec = Ec::new(backend);
-        let (readings, read_error) = read_sensor_readings(&mut ec, &[0x78, 0x79, 0x7A, 0x7B]).unwrap();
+        // No previous sample: an always-implausible offset (an unpopulated
+        // register) stays excluded without marking the read failed.
+        let (readings, read_error) =
+            read_sensor_readings(&mut ec, &[0x78, 0x79, 0x7A, 0x7B], &[]).unwrap();
         assert!(read_error.is_none());
+        assert_eq!(
+            readings,
+            vec![
+                SensorReading::new(0x78, "cpu", 45),
+                SensorReading::new(0x7B, "x7b", 60),
+            ]
+        );
+
+        // Once a sensor has been plausible, an implausible sample means it can
+        // no longer be refreshed and must be reported so the daemon counts the
+        // iteration as failed instead of silently acting on stale data.
+        let prev = vec![SensorReading::new(0x79, "gpu", 55)];
+        let (readings, read_error) =
+            read_sensor_readings(&mut ec, &[0x78, 0x79, 0x7B], &prev).unwrap();
+        let error = read_error.expect("the previously plausible sensor must be reported");
+        assert!(
+            matches!(
+                error,
+                EcError::TemperatureOutOfRange {
+                    offset: 0x79,
+                    value: 0x80
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            readings,
+            vec![
+                SensorReading::new(0x78, "cpu", 45),
+                SensorReading::new(0x7B, "x7b", 60),
+            ]
+        );
+    }
+
+    #[test]
+    fn read_sensor_readings_reports_stuck_zero_sensor() {
+        let (backend, bytes) = SharedBackend::new();
+        bytes.lock().unwrap()[0x78] = 45;
+        // A sensor stuck at 0 °C is not a plausible reading; it must be
+        // reported (with its offset) so the daemon can count the iteration as
+        // failed instead of backfilling the cache forever.
+        bytes.lock().unwrap()[0x79] = 0;
+        bytes.lock().unwrap()[0x7B] = 60;
+        let mut ec = Ec::new(backend);
+        let prev = vec![SensorReading::new(0x79, "gpu", 55)];
+        let (readings, read_error) =
+            read_sensor_readings(&mut ec, &[0x78, 0x79, 0x7B], &prev).unwrap();
+        let error = read_error.expect("the stuck-at-zero sensor must be reported");
+        assert!(
+            matches!(error, EcError::SensorUnplausible { offset: 0x79 }),
+            "unexpected error: {error:?}"
+        );
         assert_eq!(
             readings,
             vec![
