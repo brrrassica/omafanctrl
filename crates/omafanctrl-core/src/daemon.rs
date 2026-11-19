@@ -294,10 +294,20 @@ impl<B: EcBackend> Daemon<B> {
                     Mode::Manual => 3,
                     Mode::Smart => self.engine.active_smart_profile(),
                 };
+                // Persist runtime mode changes so explicit/external reloads and
+                // restarts do not revert to stale file-backed values, and keep the
+                // watcher in sync like other self-writes.
+                self.persist_config();
+                let _ = self.config_tx.send(self.config.to_ini());
             }
             Command::SetManualLevel(level) => {
                 self.engine.set_manual_level(level);
                 self.config.general.man_fan_speed = self.engine.manual_level();
+                // Persist runtime manual speed changes so reloads/restarts do not
+                // revert them and unrelated persistence does not have to capture
+                // them as a side effect.
+                self.persist_config();
+                let _ = self.config_tx.send(self.config.to_ini());
             }
             Command::SetHysteresis(enabled) => {
                 self.config.general.hysteresis = enabled;
@@ -321,7 +331,7 @@ impl<B: EcBackend> Daemon<B> {
                     );
                 }
             },
-            Command::ReloadConfig => match Config::from_file(&self.config_path) {
+            Command::ReloadConfig => match self.watcher.reload() {
                 Ok(config) => self.apply_config(config),
                 Err(error) => {
                     tracing::warn!(
