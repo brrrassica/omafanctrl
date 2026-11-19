@@ -344,11 +344,17 @@ impl<B: EcBackend> Daemon<B> {
     /// comes from `[General] Cycle` in the live configuration and is re-read
     /// after every control tick, so a configuration reload takes effect without
     /// restarting the daemon.
+    ///
+    /// Blocking EC I/O and fan-apply verification run on Tokio's blocking pool so
+    /// the async runtime is not stalled by slow or contended EC access.
     pub async fn run(
-        &mut self,
+        mut self,
         interval: Option<Duration>,
         mut shutdown: watch::Receiver<bool>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<(), EngineError>
+    where
+        B: 'static,
+    {
         // Sample and publish at the telemetry cadence, but drive the fan
         // control decision from its own deadline. Sharing one ticker made the
         // effective control cadence `max(telemetry_interval, Cycle)`, so a long
@@ -370,14 +376,24 @@ impl<B: EcBackend> Daemon<B> {
                 }
             };
             match event {
-                LoopEvent::Telemetry => self.sample()?,
+                LoopEvent::Telemetry => {
+                    self = tokio::task::spawn_blocking(move || self.sample().map(|()| self))
+                        .await
+                        .map_err(|_| EngineError::Panicked)??;
+                }
                 LoopEvent::Control => {
                     let now = Instant::now();
-                    self.tick(now)?;
-                    next_control = now + self.control_interval(interval);
+                    self = tokio::task::spawn_blocking(move || self.tick(now).map(|()| self))
+                        .await
+                        .map_err(|_| EngineError::Panicked)??;
+                    next_control = Instant::now() + self.control_interval(interval);
                 }
                 LoopEvent::Command(Some(command)) => {
-                    self.handle_command(command)?;
+                    self = tokio::task::spawn_blocking(move || {
+                        self.handle_command(command).map(|()| self)
+                    })
+                    .await
+                    .map_err(|_| EngineError::Panicked)??;
                     next_control = Instant::now() + self.control_interval(interval);
                 }
                 LoopEvent::Command(None) => break,
