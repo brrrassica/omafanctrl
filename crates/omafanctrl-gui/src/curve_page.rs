@@ -7,13 +7,34 @@ use adw::prelude::*;
 use omafanctrl_core::config::{Config, SmartMode};
 use omafanctrl_core::dbus::State;
 use omafanctrl_core::ec::TEMP_MAX_C;
+use omafanctrl_core::engine::preferred_smart_slot;
 
 use crate::curve::CurveEditor;
 use crate::state::AppState;
 
+/// The smart slot the curve page edits: the one the engine actually uses.
+///
+/// The daemon selects the curve via [`preferred_smart_slot`] of
+/// `[General] Active` (1 = Smart 1, 2 = Smart 2), falling back to slot 1 and
+/// then to the first available smart mode — the same chain
+/// `EnginePolicy::from_config` uses. Editing and display must use the same
+/// selection, otherwise edits would silently mutate an unused curve.
+fn target_slot(config: &Config) -> u8 {
+    let preferred = preferred_smart_slot(config.general.active);
+    config
+        .smart_modes
+        .iter()
+        .find(|mode| mode.slot == preferred)
+        .or_else(|| config.smart_modes.iter().find(|mode| mode.slot == 1))
+        .or_else(|| config.smart_modes.first())
+        .map(|mode| mode.slot)
+        .unwrap_or(1)
+}
+
 /// The Smart Curve page.
 pub struct CurvePage {
     root: adw::PreferencesPage,
+    editor_group: adw::PreferencesGroup,
     editor: CurveEditor,
     levels_group: adw::PreferencesGroup,
     /// Rows currently added to `levels_group`, so they can be removed on rebuild.
@@ -46,10 +67,11 @@ impl CurvePage {
         editor.connect_changed(move |levels| {
             let config = state_for_editor.config.borrow().clone();
             if let Some(mut config) = config {
-                match config.smart_modes.first_mut() {
+                let slot = target_slot(&config);
+                match config.smart_modes.iter_mut().find(|mode| mode.slot == slot) {
                     Some(mode) => mode.levels = levels,
                     None => config.smart_modes.push(SmartMode {
-                        slot: 1,
+                        slot,
                         label: None,
                         levels,
                         extra: Default::default(),
@@ -61,6 +83,7 @@ impl CurvePage {
 
         Self {
             root,
+            editor_group,
             editor,
             levels_group,
             level_rows: RefCell::new(Vec::new()),
@@ -75,10 +98,17 @@ impl CurvePage {
     }
 
     /// Apply a configuration.
+    ///
+    /// The displayed and edited curve is the slot the engine actually uses
+    /// (`preferred_smart_slot` of `[General] Active`, falling back to slot 1).
     pub fn apply_config(&self, config: &Config) {
+        let slot = target_slot(config);
+        self.editor_group
+            .set_title(&format!("Smart curve (Smart {slot})"));
         let levels = config
             .smart_modes
-            .first()
+            .iter()
+            .find(|mode| mode.slot == slot)
             .map(|mode| mode.levels.clone())
             .unwrap_or_default();
         self.editor.set_levels(levels.clone());
@@ -101,7 +131,9 @@ impl CurvePage {
                 }
                 let config = state_for_row.config.borrow().clone();
                 if let Some(mut config) = config {
-                    if let Some(mode) = config.smart_modes.first_mut() {
+                    let slot = target_slot(&config);
+                    if let Some(mode) = config.smart_modes.iter_mut().find(|mode| mode.slot == slot)
+                    {
                         if index < mode.levels.len() {
                             // Keep the threshold strictly between its neighbours;
                             // otherwise `Config::validate` rejects the edit and the
