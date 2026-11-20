@@ -67,8 +67,18 @@ async fn main() -> Result<()> {
         return revert_to_bios_auto();
     }
 
-    let config = load_config(&args.config);
-    let backend = FileBackend::open(AccessMode::ReadWrite)
+    // Startup file and EC access are synchronous (config read/parse plus a
+    // slow, contended EC open). Run them on the blocking pool so the async
+    // runtime is never stalled by storage or EC latency.
+    let config = tokio::task::spawn_blocking({
+        let path = args.config.clone();
+        move || load_config(&path)
+    })
+    .await
+    .context("configuration loader task panicked")?;
+    let backend = tokio::task::spawn_blocking(|| FileBackend::open(AccessMode::ReadWrite))
+        .await
+        .context("EC open task panicked")?
         .context("failed to open the EC; is `ec_sys write_support=1` loaded?")?;
     let ec = Ec::new(backend);
 

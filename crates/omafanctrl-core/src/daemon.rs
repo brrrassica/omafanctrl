@@ -68,7 +68,15 @@ pub struct Daemon<B: EcBackend> {
     commands: mpsc::Receiver<Command>,
     config_path: PathBuf,
     telemetry_interval: Duration,
-    /// Consecutive control/sample iterations with at least one failed EC read.
+    /// Consecutive *control* iterations with at least one failed EC read.
+    ///
+    /// `MaxReadErrors` is documented per control `Cycle`, so only the control
+    /// cadence counts toward the abort budget. Telemetry samples run at 4 Hz
+    /// and must neither consume nor reset this budget: a shared counter made
+    /// the daemon abort after ~2.5 s of EC contention instead of 10 control
+    /// cycles, and any successful telemetry sample masked a control path
+    /// failing every cycle. Telemetry failures are logged and surfaced through
+    /// the last-known-good snapshot instead.
     read_errors: u32,
     /// The last successfully read sensor bank, used to fill in sensors whose
     /// read failed on the current iteration.
@@ -176,11 +184,19 @@ impl<B: EcBackend> Daemon<B> {
     /// RPM while the engine commands a nonzero fan level is implausible (a
     /// stalled fan, a disconnected tachometer, or a bad EC read): it also keeps
     /// the last known RPM and marks the iteration as failed. After
-    /// [`General::max_read_errors`] consecutive failed iterations an error is
-    /// returned so the daemon exits and the watchdog reverts the fan.
+    /// [`General::max_read_errors`] consecutive failed *control* iterations an
+    /// error is returned so the daemon exits and the watchdog reverts the fan.
+    ///
+    /// Telemetry-only samples (see `sample`) do not count toward this budget
+    /// and do not reset it: `MaxReadErrors` is a per-`Cycle` budget, and the
+    /// 4 Hz telemetry cadence would otherwise consume it 16x faster than
+    /// documented (or mask a control-path failure streak with a 4 Hz reset).
     ///
     /// [`General::max_read_errors`]: crate::config::General::max_read_errors
-    fn read_sensors(&mut self) -> Result<(Vec<SensorReading>, u16, bool), EngineError> {
+    fn read_sensors(
+        &mut self,
+        count_toward_budget: bool,
+    ) -> Result<(Vec<SensorReading>, u16, bool), EngineError> {
         let mut last_error = None;
         let (readings, sensors_failed) = match read_sensor_readings(
             self.watchdog.ec_mut(),
@@ -224,12 +240,16 @@ impl<B: EcBackend> Daemon<B> {
         };
 
         if sensors_failed || fan_failed {
-            self.read_errors = self.read_errors.saturating_add(1);
-            if self.read_errors > self.config.general.max_read_errors {
-                let error = last_error.expect("a failed read iteration must carry an EC error");
-                return Err(error.into());
+            if count_toward_budget {
+                self.read_errors = self.read_errors.saturating_add(1);
+                if self.read_errors > self.config.general.max_read_errors {
+                    let error = last_error.expect("a failed read iteration must carry an EC error");
+                    return Err(error.into());
+                }
+            } else {
+                tracing::debug!(?last_error, "telemetry sample hit a failed EC read");
             }
-        } else {
+        } else if count_toward_budget {
             self.read_errors = 0;
         }
 
@@ -260,7 +280,7 @@ impl<B: EcBackend> Daemon<B> {
     /// Run one control iteration.
     pub fn tick(&mut self, now: Instant) -> Result<(), EngineError> {
         self.poll_config();
-        let (readings, fan_rpm, read_failed) = self.read_sensors()?;
+        let (readings, fan_rpm, read_failed) = self.read_sensors(true)?;
         if read_failed {
             // Keep the last commanded level and publish the retained snapshot
             // rather than acting on partial or stale sensor data.
@@ -300,7 +320,9 @@ impl<B: EcBackend> Daemon<B> {
     /// This drives the fast telemetry cadence so the GUI's temperature history
     /// stays fresh between control iterations, without touching the fan.
     pub fn sample(&mut self) -> Result<(), EngineError> {
-        let (readings, fan_rpm, _) = self.read_sensors()?;
+        // Telemetry never consumes or resets the control-path error budget
+        // (`MaxReadErrors` is a per-Cycle budget); see `read_sensors`.
+        let (readings, fan_rpm, _) = self.read_sensors(false)?;
         self.publish_state(&readings, fan_rpm);
         Ok(())
     }
@@ -1217,9 +1239,12 @@ mod tests {
         );
 
         // A chronically unreadable sensor must count toward MaxReadErrors so the
-        // watchdog can revert instead of masking it indefinitely.
+        // watchdog can revert instead of masking it indefinitely. Telemetry
+        // samples between control ticks never consume the budget (it is a
+        // per-Cycle budget; see `read_sensors`).
         assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.sample().is_ok());
+        assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.tick(Instant::now()).is_err());
     }
 
@@ -1241,10 +1266,12 @@ mod tests {
 
         fail_all.store(100, Ordering::Relaxed);
 
-        // Two consecutive failed iterations are tolerated, then the daemon
-        // reports an error so the watchdog can take over.
+        // Two consecutive failed control iterations are tolerated, then the
+        // daemon reports an error so the watchdog can take over. Telemetry
+        // samples in between never consume the budget.
         assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.sample().is_ok());
+        assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.tick(Instant::now()).is_err());
     }
 
@@ -1272,6 +1299,7 @@ mod tests {
         set_byte(&bytes, 0x79, 0);
         assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.sample().is_ok());
+        assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.tick(Instant::now()).is_err());
     }
 
@@ -1307,7 +1335,10 @@ mod tests {
         assert_eq!(state_rx.borrow_and_update().fan_rpm, 3900);
 
         // The streak accumulates toward MaxReadErrors and eventually fails.
-        daemon.sample().unwrap();
+        // Telemetry samples never consume the per-Cycle budget.
+        assert!(daemon.sample().is_ok());
+        assert_eq!(daemon.read_errors, 1);
+        assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.tick(Instant::now()).is_err());
     }
 
@@ -1328,6 +1359,44 @@ mod tests {
         daemon.tick(Instant::now()).unwrap();
         assert_eq!(daemon.read_errors, 0);
         assert_eq!(state_rx.borrow_and_update().fan_rpm, 0);
+    }
+
+    #[test]
+    fn telemetry_failures_do_not_consume_or_reset_the_error_budget() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
+        let backend = FlakyBackend::new(backend);
+        let fail_all = Arc::clone(&backend.fail_all);
+        let mut config = smart_config();
+        config.general.max_read_errors = 2;
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+
+        fail_all.store(u32::MAX, Ordering::Relaxed);
+
+        // Telemetry samples fail at 4 Hz but must never consume the control
+        // budget: ten failing samples in a row leave the counter untouched.
+        for _ in 0..10 {
+            assert!(daemon.sample().is_ok());
+            assert_eq!(daemon.read_errors, 0);
+        }
+
+        // Only consecutive failed *control* iterations count toward
+        // MaxReadErrors: two are tolerated, the third aborts.
+        assert!(daemon.tick(Instant::now()).is_ok());
+        assert_eq!(daemon.read_errors, 1);
+        // A successful telemetry sample must not mask a failing control path.
+        fail_all.store(0, Ordering::Relaxed);
+        assert!(daemon.sample().is_ok());
+        fail_all.store(u32::MAX, Ordering::Relaxed);
+        assert_eq!(daemon.read_errors, 1);
+        assert!(daemon.tick(Instant::now()).is_ok());
+        assert!(daemon.tick(Instant::now()).is_err());
     }
 
     #[test]
