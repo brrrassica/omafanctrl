@@ -21,8 +21,8 @@ Both the flat TPFanCtrl2 layout and explicit sections are accepted.
 | --- | --- | --- |
 | `Active` | Active mode: 0 = BIOS, 1 = Smart 1, 2 = Smart 2, 3 = Manual | 2 |
 | `Cycle` | Polling interval, seconds | 5 |
-| `ManFanSpeed` | Manual fan level (0-7) | 0 |
-| `ManModeExit` | Temperature at which Manual mode exits (0-127 °C) | 78 |
+| `ManFanSpeed` | Manual fan level (1-7) | 3 |
+| `ManModeExit` | Temperature at which Manual mode exits (0-126 °C) | 78 |
 | `MaxReadErrors` | Consecutive read errors tolerated | 10 |
 | `IconLevels` | Three ascending temperature thresholds for the tray icon | 65 75 80 |
 | `FanBeep` | `(on, off)` beep durations | 0 0 |

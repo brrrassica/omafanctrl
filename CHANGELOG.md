@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Smart-mode downward hysteresis honours unlisted committed levels.** A
+  committed level without a `smart_levels` entry (a manually commanded level
+  carried across a Manual → Smart transition, or a level clamped by the safety
+  floor/ceiling) made the step-down lookup fail and silently skipped the
+  configured `hyst_down` hold; the dwell now falls back to the closest lower
+  table entry.
+  ([#78](https://github.com/brrrassica/omafanctrl/issues/78),
+  [#82](https://github.com/brrrassica/omafanctrl/issues/82))
+- **Entering Smart mode clears the committed level.** Switching Manual → Smart
+  re-syncs hysteresis from the threshold table instead of holding anti-drop
+  state against a level absent from it.
+  ([#82](https://github.com/brrrassica/omafanctrl/issues/82))
+- **Validation rejects `ManModeExit=127`.** The exit check is strict and
+  readings are capped at `TEMP_MAX_C`, so a threshold at the ceiling could
+  never trigger and silently disabled the Manual-mode safety exit; the accepted
+  range is now `0..=126`.
+  ([#77](https://github.com/brrrassica/omafanctrl/issues/77))
+- **Validation rejects `ManFanSpeed=0`.** The EC rejects level `0x00` and the
+  engine silently substituted the safety floor, diverging from the configured
+  value; `ManFanSpeed` must now be `1..=7` and the shipped profiles set `3`.
+  ([#85](https://github.com/brrrassica/omafanctrl/issues/85))
 - **Telemetry no longer consumes the `MaxReadErrors` budget.** The 4 Hz
   telemetry sample and the control tick had shared one consecutive-error
   counter, so at the default cadence a burst of EC read failures aborted the

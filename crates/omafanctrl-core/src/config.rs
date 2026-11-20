@@ -115,13 +115,15 @@ pub enum ValidationError {
     #[error("`Cycle` must be at least 1 second, got {0}")]
     CycleTooSmall(u32),
 
-    /// `ManFanSpeed` was outside `0..=7`.
-    #[error("`ManFanSpeed` must be 0..=7, got {0}")]
+    /// `ManFanSpeed` was outside `1..=7` (`0` is the TPFanCtrl2 "off"
+    /// encoding; the EC rejects it and the engine would silently substitute
+    /// the safety floor).
+    #[error("`ManFanSpeed` must be 1..=7, got {0}")]
     ManFanSpeedOutOfRange(u8),
 
-    /// `ManModeExit` exceeded the sensor ceiling, making the Manual-mode safety
-    /// exit unreachable.
-    #[error("`ManModeExit` must be 0..={TEMP_MAX_C} °C, got {0}")]
+    /// `ManModeExit` was at or above the sensor ceiling, making the
+    /// Manual-mode safety exit unreachable.
+    #[error("`ManModeExit` must be 0..={} °C, got {}", TEMP_MAX_C - 1, .0)]
     ManModeExitOutOfRange(u8),
 
     /// `IconLevels` did not contain exactly three temperatures.
@@ -278,7 +280,7 @@ impl Default for General {
         Self {
             active: 2,
             cycle: 5,
-            man_fan_speed: 0,
+            man_fan_speed: 1,
             man_mode_exit: 78,
             max_read_errors: 10,
             process_priority: 2,
@@ -409,15 +411,19 @@ impl Config {
         if general.cycle == 0 {
             return Err(ValidationError::CycleTooSmall(general.cycle));
         }
-        if general.man_fan_speed > FAN_LEVEL_MAX {
+        // The EC rejects `0x00` ("off") outright, and `Engine::set_manual_level`
+        // would silently substitute the safety floor, diverging from the
+        // configured value; manual levels are `1..=7`.
+        if !(FAN_LEVEL_MIN..=FAN_LEVEL_MAX).contains(&general.man_fan_speed) {
             return Err(ValidationError::ManFanSpeedOutOfRange(
                 general.man_fan_speed,
             ));
         }
-        // Usable sensor readings are capped at `TEMP_MAX_C`, so an exit
-        // threshold above it could never be reached and would silently disable
-        // the Manual-mode safety exit.
-        if general.man_mode_exit > TEMP_MAX_C {
+        // Usable sensor readings are capped at `TEMP_MAX_C`, and the exit check
+        // is strict (`max_temperature > man_mode_exit`), so a threshold at or
+        // above the cap could never be reached and would silently disable the
+        // Manual-mode safety exit.
+        if general.man_mode_exit >= TEMP_MAX_C {
             return Err(ValidationError::ManModeExitOutOfRange(
                 general.man_mode_exit,
             ));
@@ -1152,7 +1158,7 @@ mod tests {
 
 Hotkeys=1
 Active=2
-ManFanSpeed=0
+ManFanSpeed=3
 ManModeExit=78
 StayOnTop=1
 SlimDialog=0
@@ -1206,7 +1212,7 @@ Level=60  3  0  0     // 60°C and above → Fan level 3
 
 Hotkeys=1
 Active=2
-ManFanSpeed=0
+ManFanSpeed=3
 ManModeExit=78
 StayOnTop=1
 SlimDialog=0
@@ -1490,7 +1496,7 @@ Foo=bar
             ConfigError::Validation(ValidationError::ManModeExitOutOfRange(128))
         ));
         assert!(
-            "ManModeExit=127\nLevel=50 2 0 0\n"
+            "ManModeExit=126\nLevel=50 2 0 0\n"
                 .parse::<Config>()
                 .is_ok()
         );
@@ -1549,9 +1555,20 @@ Foo=bar
     }
 
     #[test]
-    fn accepts_man_mode_exit_at_the_sensor_ceiling() {
-        let config: Config = "ManModeExit=127\nLevel=50 2 0 0\n".parse().unwrap();
-        assert_eq!(config.general.man_mode_exit, TEMP_MAX_C);
+    fn rejects_man_mode_exit_at_the_sensor_ceiling() {
+        // The exit check is strict (`max_temperature > man_mode_exit`) and
+        // readings are capped at `TEMP_MAX_C`, so a threshold at the ceiling
+        // can never trigger and would silently disable the safety exit.
+        let error = "ManModeExit=127\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::ManModeExitOutOfRange(127))
+        ));
+        assert!(
+            "ManModeExit=126\nLevel=50 2 0 0\n"
+                .parse::<Config>()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1560,6 +1577,24 @@ Foo=bar
         assert!(matches!(
             error,
             ConfigError::Validation(ValidationError::ManModeExitOutOfRange(128))
+        ));
+    }
+
+    #[test]
+    fn rejects_man_fan_speed_below_the_level_range() {
+        // `0` is the TPFanCtrl2 "off" encoding; the EC rejects it, so the
+        // engine would silently substitute the safety floor instead.
+        let error = "ManFanSpeed=0\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::ManFanSpeedOutOfRange(0))
+        ));
+        assert!("Active=3\nManFanSpeed=1\n".parse::<Config>().is_ok());
+        assert!("Active=3\nManFanSpeed=7\n".parse::<Config>().is_ok());
+        let error = "Active=3\nManFanSpeed=8\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::ManFanSpeedOutOfRange(8))
         ));
     }
 
