@@ -172,7 +172,10 @@ impl<B: EcBackend> Daemon<B> {
     /// partial read where some offsets failed) marks the iteration as failed,
     /// so the control path can retain its last decision instead of acting on
     /// incomplete or stale data. A failed tachometer read keeps the last known
-    /// RPM and also marks the iteration as failed. After
+    /// RPM and also marks the iteration as failed. A tachometer reading of 0
+    /// RPM while the engine commands a nonzero fan level is implausible (a
+    /// stalled fan, a disconnected tachometer, or a bad EC read): it also keeps
+    /// the last known RPM and marks the iteration as failed. After
     /// [`General::max_read_errors`] consecutive failed iterations an error is
     /// returned so the daemon exits and the watchdog reverts the fan.
     ///
@@ -196,6 +199,17 @@ impl<B: EcBackend> Daemon<B> {
             }
         };
         let (fan_rpm, fan_failed) = match self.watchdog.ec_mut().read_fan_rpm() {
+            // While the engine commands a nonzero fan level, a tachometer read
+            // of 0 RPM is implausible: the fan cannot be stationary while it is
+            // being driven. Treat it like a failed read so a stalled fan (or a
+            // disconnected tachometer, or a bad EC read) accumulates toward
+            // `MaxReadErrors` instead of silently resetting the error streak,
+            // and keep the last known RPM for telemetry. A genuine 0 RPM in
+            // BIOS-auto or idle is accepted.
+            Ok(0) if self.engine.current_level().is_some_and(|level| level > 0) => {
+                last_error.get_or_insert(EcError::FanRpmUnplausible { value: 0 });
+                (self.last_fan_rpm, true)
+            }
             Ok(fan_rpm) => (fan_rpm, false),
             Err(error) => {
                 last_error.get_or_insert(error);
@@ -296,11 +310,12 @@ impl<B: EcBackend> Daemon<B> {
         match command {
             Command::SetMode(mode) => {
                 self.engine.set_mode(mode);
-                if mode == Mode::Smart {
-                    self.engine.set_active_smart_profile(preferred_smart_slot(
-                        self.config.general.active,
-                    ));
-                }
+                // Do not re-derive the smart profile slot from the live config:
+                // while outside Smart mode `config.general.active` holds the
+                // transient BIOS/Manual encoding (0/3), so re-deriving here
+                // would clobber the user's Smart slot selection on re-entry.
+                // The engine keeps its slot across non-Smart modes; it is only
+                // re-derived from the config in `apply_config`.
                 self.config.general.active = match mode {
                     Mode::Bios => 0,
                     Mode::Manual => 3,
@@ -454,7 +469,8 @@ impl<B: EcBackend> Daemon<B> {
         // Keep the engine's manual level in sync with the reloaded file; the
         // setter clamps to the safety floor/ceiling.
         self.engine.set_manual_level(config.general.man_fan_speed);
-        self.engine.set_mode(Mode::from_active(config.general.active));
+        self.engine
+            .set_mode(Mode::from_active(config.general.active));
         self.engine
             .set_active_smart_profile(preferred_smart_slot(config.general.active));
         self.engine.reset();
@@ -545,7 +561,10 @@ fn write_config_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ec::{EC_WINDOW_SIZE, EcError, FAN_BIOS_AUTO, REG_FAN_CONTROL, TEMP_MAX_C};
+    use crate::ec::{
+        EC_WINDOW_SIZE, EcError, FAN_BIOS_AUTO, REG_FAN_CONTROL, REG_FAN_RPM_HIGH, REG_FAN_RPM_LOW,
+        TEMP_MAX_C,
+    };
     use crate::engine::Mode;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
@@ -816,6 +835,8 @@ mod tests {
     #[test]
     fn daemon_applies_manual_level() {
         let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
         let mut daemon = Daemon::new(
             ec(backend),
             smart_config(),
@@ -1029,6 +1050,42 @@ mod tests {
     }
 
     #[test]
+    fn daemon_set_mode_smart_preserves_engine_smart_slot_across_mode_cycle() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        let config: Config = "Active=2\nLevel=50 2 0 0\nLevel=60 3 0 0\n"
+            .parse()
+            .unwrap();
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+
+        // Startup with `Active=2`: Smart 2 is the active slot.
+        assert_eq!(daemon.engine().active_smart_profile(), 2);
+
+        // Cycle BIOS -> Manual -> Smart: the transient `Active=0`/`Active=3`
+        // written by the intermediate arms must not clobber the slot when the
+        // user returns to Smart.
+        daemon.handle_command(Command::SetMode(Mode::Bios)).unwrap();
+        daemon
+            .handle_command(Command::SetMode(Mode::Manual))
+            .unwrap();
+        daemon
+            .handle_command(Command::SetMode(Mode::Smart))
+            .unwrap();
+
+        assert_eq!(daemon.engine().mode(), Mode::Smart);
+        assert_eq!(daemon.engine().active_smart_profile(), 2);
+        assert_eq!(daemon.config().general.active, 2);
+
+        // The persisted document keeps the user's Smart 2 selection too.
+        let live_ini = daemon.config().to_ini();
+        assert!(live_ini.contains("Active=2"));
+    }
+
+    #[test]
     fn daemon_applies_and_persists_set_config() {
         let path = temp_path("set-config");
         std::fs::write(&path, "Active=1\nLevel=50 2 0 0\nLevel=60 3 0 0\n").unwrap();
@@ -1089,6 +1146,8 @@ mod tests {
         let (backend, bytes) = SharedBackend::new();
         set_byte(&bytes, 0x78, 60);
         set_byte(&bytes, 0x79, 55);
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
         let backend = FlakyBackend::new(backend);
         let failures = Arc::clone(&backend.failing_offsets);
         let mut daemon = Daemon::new(
@@ -1132,6 +1191,8 @@ mod tests {
         let (backend, bytes) = SharedBackend::new();
         set_byte(&bytes, 0x78, 60);
         set_byte(&bytes, 0x79, 55);
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
         let backend = FlakyBackend::new(backend);
         let failures = Arc::clone(&backend.failing_offsets);
         failures
@@ -1157,6 +1218,8 @@ mod tests {
     fn daemon_tolerates_max_read_errors_before_failing() {
         let (backend, bytes) = SharedBackend::new();
         set_byte(&bytes, 0x78, 60);
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
         let backend = FlakyBackend::new(backend);
         let fail_all = Arc::clone(&backend.fail_all);
         let mut config = smart_config();
@@ -1201,6 +1264,61 @@ mod tests {
         assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.sample().is_ok());
         assert!(daemon.tick(Instant::now()).is_err());
+    }
+
+    #[test]
+    fn daemon_counts_zero_rpm_while_commanding_nonzero_level_as_failed() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        let mut config = smart_config();
+        config.general.max_read_errors = 2;
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+        let mut state_rx = daemon.state_receiver();
+
+        // Prime with a healthy iteration: the engine commands level 3.
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(daemon.read_errors, 0);
+        // Level 3 maps to 3900 RPM on the E14 Gen 4 curve.
+        assert_eq!(state_rx.borrow_and_update().fan_rpm, 3900);
+
+        // The tachometer reads 0x0000 while level 3 is commanded: a stalled
+        // fan, a disconnected tach, or a bad EC read. This must count as a
+        // failed iteration instead of silently resetting the error streak, and
+        // telemetry must retain the last known RPM.
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0);
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(daemon.read_errors, 1);
+        assert_eq!(state_rx.borrow_and_update().fan_rpm, 3900);
+
+        // The streak accumulates toward MaxReadErrors and eventually fails.
+        daemon.sample().unwrap();
+        assert!(daemon.tick(Instant::now()).is_err());
+    }
+
+    #[test]
+    fn daemon_accepts_zero_rpm_without_a_commanded_level() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        let mut daemon = Daemon::new(
+            ec(backend),
+            smart_config(),
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+        let mut state_rx = daemon.state_receiver();
+
+        // In BIOS auto no level is commanded, so a genuine 0 RPM tach reading
+        // stays a healthy success.
+        daemon.handle_command(Command::SetMode(Mode::Bios)).unwrap();
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(daemon.read_errors, 0);
+        assert_eq!(state_rx.borrow_and_update().fan_rpm, 0);
     }
 
     #[test]
@@ -1332,6 +1450,8 @@ mod tests {
         std::fs::write(&path, "Level=50 2 0 0\nLevel=60 3 0 0\n").unwrap();
         let (backend, bytes) = SharedBackend::new();
         set_byte(&bytes, 0x78, 50);
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
         let config = Config::from_file(&path).unwrap();
         let mut daemon = Daemon::new(ec(backend), config, path.clone())
             // A telemetry interval far longer than the control interval must not

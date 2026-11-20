@@ -1119,7 +1119,6 @@ impl ConfigWatcher {
         self.last = Some(FileStamp::from_contents(&contents));
         Ok(config)
     }
-
 }
 
 #[cfg(test)]

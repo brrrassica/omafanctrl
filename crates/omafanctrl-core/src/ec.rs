@@ -219,6 +219,15 @@ pub enum EcError {
         offset: u8,
     },
 
+    /// The fan tachometer returned an implausible reading: 0 RPM while a
+    /// nonzero fan level is commanded, indicating a stalled fan, a
+    /// disconnected tachometer, or a bad EC read.
+    #[error("fan tachometer returned {value} RPM while a nonzero fan level is commanded")]
+    FanRpmUnplausible {
+        /// The implausible RPM value.
+        value: u16,
+    },
+
     /// A write was rejected because the rate limit has not elapsed.
     #[error("EC write rate limit active; retry in {retry_after:?}")]
     RateLimited {
