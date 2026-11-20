@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-11-20
+
+### Fixed
+
+- **Telemetry no longer consumes the `MaxReadErrors` budget.** The 4 Hz
+  telemetry sample and the control tick had shared one consecutive-error
+  counter, so at the default cadence a burst of EC read failures aborted the
+  daemon after ~2.5 s instead of the documented 10 control cycles — and any
+  successful telemetry sample masked a control path failing every cycle.
+  ([#74](https://github.com/brrrassica/omafanctrl/issues/74))
+- **A stalled fan is flagged instead of reported healthy.** A tachometer read
+  of 0 RPM while the engine commands a nonzero fan level is now treated as a
+  failed read: the last known RPM is kept for telemetry and the iteration
+  counts toward `MaxReadErrors`. A genuine 0 RPM in BIOS-auto or idle is still
+  accepted. ([#71](https://github.com/brrrassica/omafanctrl/issues/71))
+- **Implausible sensor reads count toward the error budget.** Sensors stuck at
+  zero or returning out-of-range temperatures were silently replaced by the
+  last cached value and reset the error streak, letting control run on frozen
+  temperatures; they are now reported as per-iteration errors and partial
+  failures mark the whole iteration. ([#66](https://github.com/brrrassica/omafanctrl/issues/66))
+- **Runtime mode and manual level persist consistently.** `SetMode` and
+  `SetManualLevel` persist their own changes (with watcher sync), the thermal
+  safety manual-exit persists the new mode, and cycling BIOS → Manual → Smart
+  preserves the selected Smart slot instead of reverting to Smart 1.
+  ([#70](https://github.com/brrrassica/omafanctrl/issues/70),
+  [#67](https://github.com/brrrassica/omafanctrl/issues/67),
+  [#69](https://github.com/brrrassica/omafanctrl/issues/69))
+- **The curve page edits the Smart slot the engine actually drives.**
+  ([#75](https://github.com/brrrassica/omafanctrl/issues/75))
+- **Threshold-less Smart configurations are rejected, and reload honours
+  `Active`.** A config with `Active=1/2` but no `[SmartMode]` sections is now
+  invalid, the config-load fallback fails safe to BIOS, and a reloaded
+  configuration re-applies the mode from `[General] Active`.
+  ([#73](https://github.com/brrrassica/omafanctrl/issues/73),
+  [#59](https://github.com/brrrassica/omafanctrl/issues/59))
+
 ## [1.1.5] - 2026-11-18
 
 ### Fixed
@@ -80,6 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration is kept, and a genuinely fatal loop error now exits the daemon
   non-zero so systemd can restart it.
 
+[1.1.6]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.6
 [1.1.5]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.5
 [1.1.4]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.4
 [1.1.3]: https://github.com/omafanctrl/omafanctrl/releases/tag/v1.1.3
