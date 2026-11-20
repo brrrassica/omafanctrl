@@ -193,6 +193,35 @@ pub enum ValidationError {
         level: u8,
     },
 
+    /// A smart mode's downward hysteresis reached its threshold, so the
+    /// saturating subtraction would hold the current level forever.
+    #[error(
+        "smart mode {mode} hystDown {hyst_down} must be less than its threshold {temperature} °C"
+    )]
+    SmartHystDownOutOfRange {
+        /// The 1-based smart mode number.
+        mode: usize,
+        /// The level's threshold temperature.
+        temperature: u8,
+        /// The offending hysteresis.
+        hyst_down: u8,
+    },
+
+    /// A smart mode's upward hysteresis saturated past the sensor ceiling when
+    /// added to its threshold, making the step-up unreachable.
+    #[error(
+        "smart mode {mode} hystUp {hyst_up} at {temperature} °C must not saturate past {} °C",
+        TEMP_MAX_C
+    )]
+    SmartHystUpOutOfRange {
+        /// The 1-based smart mode number.
+        mode: usize,
+        /// The level's threshold temperature.
+        temperature: u8,
+        /// The offending hysteresis.
+        hyst_up: u8,
+    },
+
     /// A smart mode's temperatures were not strictly ascending.
     #[error("smart mode {mode} temperatures must be strictly ascending, got {temperatures:?}")]
     SmartTemperaturesNotAscending {
@@ -475,6 +504,27 @@ impl Config {
                     return Err(ValidationError::SmartFanLevelOutOfRange {
                         mode: mode_number,
                         level: level.fan_level,
+                    });
+                }
+                // A step-up threshold plus `hyst_up` must remain within the
+                // usable sensor range: saturating addition past `TEMP_MAX_C`
+                // would make the step-up unreachable, silently disabling the
+                // level.
+                if level.temperature.saturating_add(level.hyst_up) > TEMP_MAX_C {
+                    return Err(ValidationError::SmartHystUpOutOfRange {
+                        mode: mode_number,
+                        temperature: level.temperature,
+                        hyst_up: level.hyst_up,
+                    });
+                }
+                // A downward hysteresis at or above its threshold saturates the
+                // step-down comparison to 0 °C, so the engine would hold the
+                // current level forever as the machine cools.
+                if level.hyst_down >= level.temperature {
+                    return Err(ValidationError::SmartHystDownOutOfRange {
+                        mode: mode_number,
+                        temperature: level.temperature,
+                        hyst_down: level.hyst_down,
                     });
                 }
                 temperatures.push(level.temperature);
@@ -1525,6 +1575,37 @@ Foo=bar
             error,
             ConfigError::Validation(ValidationError::SmartTemperaturesNotAscending { mode: 1, .. })
         ));
+    }
+
+    #[test]
+    fn rejects_saturating_smart_hysteresis() {
+        // `hystUp` saturating past the sensor ceiling makes the step-up
+        // unreachable, so the engine could never advance to that level.
+        let error = "Level=120 2 20 0\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::SmartHystUpOutOfRange {
+                mode: 1,
+                temperature: 120,
+                hyst_up: 20
+            })
+        ));
+        // `hystDown` at the threshold saturates the step-down comparison to
+        // 0 °C, so the engine would hold the level forever while cooling.
+        let error = "Level=50 2 0 50\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::SmartHystDownOutOfRange {
+                mode: 1,
+                temperature: 50,
+                hyst_down: 50
+            })
+        ));
+        // Boundary values stay accepted: a step-down guard that still leaves a
+        // usable band, and an exact step-up comparison at the ceiling.
+        assert!("Level=50 2 0 49\n".parse::<Config>().is_ok());
+        assert!("Level=127 2 0 0\n".parse::<Config>().is_ok());
+        assert!("Level=110 2 17 0\n".parse::<Config>().is_ok());
     }
 
     #[test]
