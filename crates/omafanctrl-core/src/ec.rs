@@ -420,9 +420,25 @@ impl<B: EcBackend> Ec<B> {
     /// The value is `(high << 8) | low` from [`REG_FAN_RPM_HIGH`] and
     /// [`REG_FAN_RPM_LOW`]. On dual-fan models this returns the currently
     /// selected fan (see [`REG_FAN_SWITCH`]); the E14 Gen 4 has a single fan.
+    ///
+    /// The tachometer is sampled atomically: the high byte is read before and
+    /// after the low byte, and the low byte is re-read until the two high-byte
+    /// reads agree, so a low-byte rollover between transactions cannot tear
+    /// the composed value.
     pub fn read_fan_rpm(&mut self) -> Result<u16, EcError> {
-        let low = self.read_byte(REG_FAN_RPM_LOW)?;
-        let high = self.read_byte(REG_FAN_RPM_HIGH)?;
+        // Read high, low, high: if the tachometer is incremented between the
+        // two single-byte transactions, the high byte acts as a stability
+        // check for the pair. Without it, a low-byte rollover between the
+        // two reads would compose a torn value off by up to 256 RPM.
+        let mut high = self.read_byte(REG_FAN_RPM_HIGH)?;
+        let low = loop {
+            let low = self.read_byte(REG_FAN_RPM_LOW)?;
+            let high_again = self.read_byte(REG_FAN_RPM_HIGH)?;
+            if high_again == high {
+                break low;
+            }
+            high = high_again;
+        };
         Ok((u16::from(high) << 8) | u16::from(low))
     }
 
@@ -484,6 +500,12 @@ impl<B: EcBackend> Ec<B> {
     /// verified.
     fn apply_fan_control(&mut self, value: u8) -> Result<(), EcError> {
         self.raw_write(REG_FAN_SWITCH, FAN_SWITCH_SELFAN1)?;
+        // The handshake has touched the EC, so start the rate-limit clock
+        // now: if a later step fails (an I/O error partway through the
+        // handshake or a read-back mismatch), the writes already happened
+        // and a retry must still honour `min_write_interval` (invariant I6
+        // in `docs/ec-write-audit.md`).
+        self.last_write = Some(Instant::now());
         self.raw_write(REG_FAN_CONTROL, value)?;
         self.raw_write(REG_FAN_SWITCH, FAN_SWITCH_SELFAN2)?;
         self.raw_write(REG_FAN_CONTROL, value)?;
@@ -495,7 +517,6 @@ impl<B: EcBackend> Ec<B> {
         for attempt in 0..FAN_CONTROL_VERIFY_ATTEMPTS {
             actual = self.backend.read_byte(usize::from(REG_FAN_CONTROL))?;
             if actual == value {
-                self.last_write = Some(Instant::now());
                 return Ok(());
             }
             if attempt + 1 < FAN_CONTROL_VERIFY_ATTEMPTS {
@@ -632,6 +653,14 @@ mod tests {
     }
 
     #[test]
+    fn fan_rpm_high_byte_is_stable_across_reads() {
+        let mut ec = ec();
+        ec.backend.bytes[usize::from(REG_FAN_RPM_LOW)] = 0xFF;
+        ec.backend.bytes[usize::from(REG_FAN_RPM_HIGH)] = 0x12;
+        assert_eq!(ec.read_fan_rpm().unwrap(), 0x12FF);
+    }
+
+    #[test]
     fn rejects_implausible_temperature() {
         let mut ec = ec();
         ec.backend.bytes[0x78] = 200;
@@ -758,6 +787,29 @@ mod tests {
                 actual: 0
             }
         ));
+    }
+
+    #[test]
+    fn failed_fan_control_apply_still_advances_rate_limit() {
+        let mut ec = Ec::new(StubbornBackend {
+            bytes: [0u8; EC_WINDOW_SIZE],
+        })
+        .with_min_write_interval(Duration::from_secs(3600));
+        assert!(matches!(
+            ec.set_fan_level(3).unwrap_err(),
+            EcError::FanControlNotApplied { .. }
+        ));
+        // The failed handshake still wrote to the EC (the fan switch was
+        // toggled), so a retry must be rate-limited instead of issuing
+        // back-to-back handshakes.
+        assert!(matches!(
+            ec.set_fan_level(3).unwrap_err(),
+            EcError::RateLimited { .. }
+        ));
+        assert_eq!(
+            ec.backend.bytes[usize::from(REG_FAN_SWITCH)],
+            FAN_SWITCH_SELFAN1
+        );
     }
 
     #[test]
