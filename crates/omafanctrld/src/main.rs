@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use omafanctrl_core::config::Config;
+use omafanctrl_core::config::{Config, General};
 use omafanctrl_core::daemon::Daemon;
 use omafanctrl_core::dbus::{self, Control, State};
 use omafanctrl_core::ec::{AccessMode, Ec, FileBackend};
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         .context("failed to open the EC; is `ec_sys write_support=1` loaded?")?;
     let ec = Ec::new(backend);
 
-    let mut daemon = Daemon::new(ec, config, args.config.clone())
+    let daemon = Daemon::new(ec, config, args.config.clone())
         .with_telemetry_interval(Duration::from_millis(args.telemetry_interval_ms.max(1)));
     let control = Control::new(daemon.control_service());
 
@@ -136,7 +136,16 @@ fn load_config(path: &Path) -> Config {
                 path = %path.display(),
                 "failed to load configuration; using defaults"
             );
-            Config::default()
+            // Fail safe: the default fallback starts in BIOS mode rather than
+            // Smart, since with no parsed `[SmartMode]` thresholds Smart control
+            // would only ever command the safety floor.
+            Config {
+                general: General {
+                    active: 0,
+                    ..General::default()
+                },
+                ..Config::default()
+            }
         }
     }
 }

@@ -158,6 +158,14 @@ pub enum ValidationError {
     #[error("at most {MAX_SMART_MODES} smart modes are supported, got {0}")]
     TooManySmartModes(usize),
 
+    /// `Active` selected Smart mode but no smart mode is defined, so the engine
+    /// would have no thresholds and would command only the safety floor.
+    #[error(
+        "`Active` selects Smart mode but no smart mode is defined; \
+         add a `Level=` entry or set `Active=0`"
+    )]
+    SmartModeMissing,
+
     /// A smart mode defined no `Level` entries.
     #[error("smart mode {mode} must define at least one `Level`")]
     SmartModeEmpty {
@@ -478,6 +486,15 @@ impl Config {
                     fan_levels,
                 });
             }
+        }
+
+        // `Active` 1 or 2 selects Smart mode. With no smart mode defined the
+        // engine has an empty threshold list and would command only the safety
+        // floor for every temperature below the emergency ceiling, so such a
+        // configuration is rejected (fail safe: `Active=0` hands the fan to
+        // the firmware).
+        if (general.active == 1 || general.active == 2) && self.smart_modes.is_empty() {
+            return Err(ValidationError::SmartModeMissing);
         }
 
         if self
@@ -1313,8 +1330,8 @@ Level=60  3  0  0
 
     #[test]
     fn keys_are_case_insensitive() {
-        let config: Config = "[GENERAL]\nACTIVE=1\nCYCLE=9\n".parse().unwrap();
-        assert_eq!(config.general.active, 1);
+        let config: Config = "[GENERAL]\nACTIVE=3\nCYCLE=9\n".parse().unwrap();
+        assert_eq!(config.general.active, 3);
         assert_eq!(config.general.cycle, 9);
     }
 
@@ -1335,9 +1352,9 @@ Level=60  3  0  0
 
     #[test]
     fn supports_semicolon_and_hash_comments() {
-        let input = "; a comment\n# another\nActive=1 ; inline\nCycle=7 # inline\n";
+        let input = "; a comment\n# another\nActive=3 ; inline\nCycle=7 # inline\nLevel=50 2 0 0\n";
         let config: Config = input.parse().unwrap();
-        assert_eq!(config.general.active, 1);
+        assert_eq!(config.general.active, 3);
         assert_eq!(config.general.cycle, 7);
     }
 
@@ -1395,7 +1412,7 @@ Level2=55 3 0 0
     fn preserves_unknown_keys_and_sections() {
         let input = "\
 [General]
-Active=1
+Active=3
 CustomThing=hello
 
 [Weird]
@@ -1472,7 +1489,26 @@ Foo=bar
             error,
             ConfigError::Validation(ValidationError::ManModeExitOutOfRange(128))
         ));
-        assert!("ManModeExit=127\n".parse::<Config>().is_ok());
+        assert!(
+            "ManModeExit=127\nLevel=50 2 0 0\n"
+                .parse::<Config>()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_smart_mode_missing_when_active_selects_smart() {
+        // `Active=1`/`Active=2` require at least one smart mode: otherwise the
+        // engine's threshold list is empty and Smart control would command only
+        // the safety floor for every temperature below the emergency ceiling.
+        let error = "Active=2\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::SmartModeMissing)
+        ));
+        // BIOS and Manual startup modes do not require a smart mode.
+        assert!("Active=0\n".parse::<Config>().is_ok());
+        assert!("Active=3\n".parse::<Config>().is_ok());
     }
 
     #[test]
@@ -1514,7 +1550,7 @@ Foo=bar
 
     #[test]
     fn accepts_man_mode_exit_at_the_sensor_ceiling() {
-        let config: Config = "ManModeExit=127\n".parse().unwrap();
+        let config: Config = "ManModeExit=127\nLevel=50 2 0 0\n".parse().unwrap();
         assert_eq!(config.general.man_mode_exit, TEMP_MAX_C);
     }
 
@@ -1579,9 +1615,9 @@ Foo=bar
     #[test]
     fn loads_from_a_file() {
         let path = temp_path("load");
-        std::fs::write(&path, "Active=1\nCycle=3\n").unwrap();
+        std::fs::write(&path, "Active=3\nCycle=3\nLevel=50 2 0 0\n").unwrap();
         let config = Config::from_file(&path).unwrap();
-        assert_eq!(config.general.active, 1);
+        assert_eq!(config.general.active, 3);
         assert_eq!(config.general.cycle, 3);
         std::fs::remove_file(&path).ok();
     }
@@ -1596,17 +1632,17 @@ Foo=bar
     #[test]
     fn watcher_reports_first_load_then_only_changes() {
         let path = temp_path("watch");
-        std::fs::write(&path, "Active=1\nCycle=3\n").unwrap();
+        std::fs::write(&path, "Active=3\nCycle=3\nLevel=50 2 0 0\n").unwrap();
         let mut watcher = ConfigWatcher::new(&path);
 
         let first = watcher.poll().unwrap();
-        assert_eq!(first.unwrap().general.active, 1);
+        assert_eq!(first.unwrap().general.active, 3);
         // Unchanged contents: no reload.
         assert!(watcher.poll().unwrap().is_none());
 
-        std::fs::write(&path, "Active=2\nCycle=3\n").unwrap();
+        std::fs::write(&path, "Active=0\nCycle=3\nLevel=50 2 0 0\n").unwrap();
         let changed = watcher.poll().unwrap();
-        assert_eq!(changed.unwrap().general.active, 2);
+        assert_eq!(changed.unwrap().general.active, 0);
         assert!(watcher.poll().unwrap().is_none());
 
         std::fs::remove_file(&path).ok();
@@ -1615,11 +1651,11 @@ Foo=bar
     #[test]
     fn watcher_force_reload_ignores_fingerprint() {
         let path = temp_path("reload");
-        std::fs::write(&path, "Active=1\n").unwrap();
+        std::fs::write(&path, "Active=3\nLevel=50 2 0 0\n").unwrap();
         let mut watcher = ConfigWatcher::new(&path);
         watcher.poll().unwrap();
         let reloaded = watcher.reload().unwrap();
-        assert_eq!(reloaded.general.active, 1);
+        assert_eq!(reloaded.general.active, 3);
         std::fs::remove_file(&path).ok();
     }
 
@@ -1684,7 +1720,7 @@ Foo=bar
             "IgnoreSensors=,,,",
             "IgnoreSensors=pwr,no5",
             "\u{0}\u{1}\u{2}",
-            "Active=1\r\nCycle=2\r\n",
+            "Active=3\r\nCycle=2\r\n",
             "Level=50 2 0 0\nLevel=40 1 0 0\n",
             "[Weird]\nFoo=bar\n",
             "// comment only\n",
