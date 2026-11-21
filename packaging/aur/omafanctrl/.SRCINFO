@@ -1,6 +1,6 @@
 pkgbase = omafanctrl
 	pkgdesc = Modern fan control suite for the ThinkPad E14 Gen 4 on Omarchy Quattro
-	pkgver = 1.1.6
+	pkgver = 1.1.7
 	pkgrel = 1
 	url = https://github.com/brrrassica/omafanctrl
 	arch = x86_64

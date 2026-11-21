@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.7] - 2026-11-21
+
+### Fixed
+
+- **Smart-mode downward hysteresis honours unlisted committed levels** and
+  entering Smart mode (via `SetMode` or the thermal manual-exit) clears the
+  committed level, so the configured `hyst_down` hold is never skipped after a
+  Manual → Smart transition.
+  ([#78](https://github.com/brrrassica/omafanctrl/issues/78),
+  [#82](https://github.com/brrrassica/omafanctrl/issues/82),
+  [#87](https://github.com/brrrassica/omafanctrl/issues/87))
+- **Validation rejects configurations the engine cannot honour.**
+  `ManModeExit=127` (the strict exit check can never trigger at the reading
+  cap), `ManFanSpeed=0` (the EC rejects level `0x00`), and smart hysteresis
+  values that saturate the step-up/step-down comparisons are all rejected at
+  parse time.
+  ([#77](https://github.com/brrrassica/omafanctrl/issues/77),
+  [#85](https://github.com/brrrassica/omafanctrl/issues/85),
+  [#88](https://github.com/brrrassica/omafanctrl/issues/88))
+- **Chart and curve-editor axes cover the full `0..=TEMP_MAX_C` range**
+  instead of hard-coding 100 °C, so valid readings above 100 °C are no longer
+  pinned to the top/right edge.
+  ([#84](https://github.com/brrrassica/omafanctrl/issues/84),
+  [#89](https://github.com/brrrassica/omafanctrl/issues/89))
+
 ## [1.1.6] - 2026-11-20
 
 ### Fixed
@@ -146,6 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration is kept, and a genuinely fatal loop error now exits the daemon
   non-zero so systemd can restart it.
 
+[1.1.7]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.7
 [1.1.6]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.6
 [1.1.5]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.5
 [1.1.4]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.4
