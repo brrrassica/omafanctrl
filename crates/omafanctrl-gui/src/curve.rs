@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn maps_coordinates_to_values() {
         assert_eq!(x_to_temperature(0.0, 100.0), 0.0);
-        assert_eq!(x_to_temperature(100.0, 100.0), 100.0);
+        assert_eq!(x_to_temperature(100.0, 100.0), MAX_TEMPERATURE);
         assert_eq!(y_to_level(0.0, 100.0), FAN_LEVEL_MAX);
         assert_eq!(y_to_level(100.0, 100.0), FAN_LEVEL_MIN);
     }
