@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sensor display names that cannot round-trip are rejected.** A
+  `SensorName<N>` value containing `;`, `#`, `//`, or a newline was written
+  verbatim and then truncated (or broke the line structure) on the next parse,
+  silently losing the label after a restart or reload. `Config::validate` now
+  reports `InvalidSensorName` for such values (and for leading/trailing
+  whitespace, which the parser would trim away), the parser rejects
+  `SensorName` lines carrying an inline-comment marker outright, and the
+  Sensors page trims and refuses such names with a toast instead of persisting
+  them. ([#91](https://github.com/brrrassica/omafanctrl/issues/91))
 - **Smart-mode downward hysteresis honours unlisted committed levels.** A
   committed level without a `smart_levels` entry (a manually commanded level
   carried across a Manual → Smart transition, or a level clamped by the safety

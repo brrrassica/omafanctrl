@@ -214,6 +214,20 @@ pub enum ValidationError {
     /// The ignore list contained an empty sensor name.
     #[error("`IgnoreSensors` contains an empty sensor name")]
     EmptySensorName,
+
+    /// A sensor display name could not survive an `.ini` round-trip: it
+    /// contained an inline-comment marker or a newline, or started or ended
+    /// with whitespace, so the next parse would truncate or drop it.
+    #[error(
+        "`SensorName{sequence}` display name `{name}` must not contain \
+         `;`, `#`, `//`, or a newline, and must not start or end with whitespace"
+    )]
+    InvalidSensorName {
+        /// The sensor sequence number of the offending name.
+        sequence: u8,
+        /// The offending display name.
+        name: String,
+    },
 }
 
 /// The `[General]` section.
@@ -511,6 +525,14 @@ impl Config {
         {
             return Err(ValidationError::EmptySensorName);
         }
+        for (&sequence, name) in &self.sensors.names {
+            if name.trim() != name || name.contains([';', '#', '\n', '\r']) || name.contains("//") {
+                return Err(ValidationError::InvalidSensorName {
+                    sequence,
+                    name: name.clone(),
+                });
+            }
+        }
 
         Ok(())
     }
@@ -777,6 +799,23 @@ fn parse_raw(input: &str) -> Result<RawIni, ConfigError> {
         let value = value.trim().to_string();
 
         let (target, normalized_key) = route(section.as_deref(), &key);
+        if target == Target::Sensors && normalized_key.starts_with("sensorname") {
+            // `value` comes from the comment-stripped content, so a name such
+            // as `CPU; core` is already truncated to `CPU` at this point. Check
+            // the raw right-hand side instead and report the corruption rather
+            // than silently storing a truncated display name.
+            let raw_value = trimmed.split_once('=').map(|(_, rhs)| rhs.trim());
+            if let Some(raw_value) = raw_value {
+                if strip_inline_comment(raw_value) != raw_value {
+                    return Err(ConfigError::InvalidValue {
+                        line: line_number,
+                        key: normalized_key,
+                        value: raw_value.to_string(),
+                        reason: "value contains an inline comment marker".to_string(),
+                    });
+                }
+            }
+        }
         match target {
             Target::General => {
                 raw.general.push((normalized_key, value, line_number));
@@ -1518,6 +1557,67 @@ Foo=bar
     }
 
     #[test]
+    fn rejects_sensor_names_that_cannot_round_trip() {
+        // A `;`, `#`, or `//` would be parsed as an inline comment and a
+        // newline would break the `key=value` line structure, so the name
+        // would silently truncate or vanish on the next parse.
+        for (name, expected) in [
+            ("CPU; core", "CPU; core"),
+            ("CPU #1", "CPU #1"),
+            ("CPU //die", "CPU //die"),
+        ] {
+            let error = format!("Active=0\nSensorName0={name}\n")
+                .parse::<Config>()
+                .unwrap_err();
+            match error {
+                ConfigError::Validation(ValidationError::InvalidSensorName {
+                    sequence,
+                    name: stored,
+                }) => {
+                    assert_eq!(sequence, 0);
+                    assert_eq!(stored, expected);
+                }
+                ConfigError::InvalidValue { value: stored, .. } => {
+                    assert_eq!(stored, expected);
+                }
+                other => panic!("unexpected error for {name:?}: {other:?}"),
+            }
+        }
+        // Leading/trailing whitespace is trimmed on parse, so it can never be
+        // stored via the parser — but `validate` still rejects it because the
+        // GUI can insert untrimmed names directly.
+        let mut config: Config = "Active=0\nSensorName0=CPU\n".parse().unwrap();
+        config.sensors.names.insert(1, " padded".to_string());
+        assert!(matches!(
+            config.validate(),
+            Err(ValidationError::InvalidSensorName { sequence: 1, .. })
+        ));
+        // An embedded newline breaks the `key=value` line structure outright.
+        let error = "Active=0\nSensorName0=CPU\ndie\n"
+            .parse::<Config>()
+            .unwrap_err();
+        assert!(matches!(error, ConfigError::MalformedLine { line: 3, .. }));
+        // Names without INI-breaking characters are still accepted, including
+        // `=`, which survives the round-trip because it splits on the first `=`.
+        assert!(
+            "Active=0\nSensorName0=CPU (PECI)\n"
+                .parse::<Config>()
+                .is_ok()
+        );
+        assert!("Active=0\nSensorName0=peak=60\n".parse::<Config>().is_ok());
+    }
+
+    #[test]
+    fn sensor_names_round_trip_through_to_ini() {
+        let config: Config = "Active=0\nSensorName0=CPU (PECI)\nSensorName12=x7c\n"
+            .parse()
+            .unwrap();
+        let rendered = config.to_ini();
+        let reparsed: Config = rendered.parse().unwrap();
+        assert_eq!(config, reparsed);
+    }
+
+    #[test]
     fn rejects_non_ascending_smart_temperatures() {
         let input = "Level=60 3 0 0\nLevel=50 2 0 0\n";
         let error = input.parse::<Config>().unwrap_err();
@@ -1751,6 +1851,9 @@ Foo=bar
             "IconLevels=65,75,80",
             "FanBeep=1",
             "SensorName=",
+            "SensorName0=bad;name",
+            "SensorName0=bad#name",
+            "SensorName0=bad//name",
             "SensorName999999999999999999999=x",
             "IgnoreSensors=,,,",
             "IgnoreSensors=pwr,no5",
