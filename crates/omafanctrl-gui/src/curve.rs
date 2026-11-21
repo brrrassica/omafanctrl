@@ -17,7 +17,7 @@ const MIN_TEMPERATURE: f64 = 0.0;
 
 /// The upper bound of the temperature axis (°C), matching the validated
 /// threshold range so any accepted threshold stays draggable.
-const MAX_TEMPERATURE: f64 = f64::from(TEMP_MAX_C);
+const MAX_TEMPERATURE: f64 = TEMP_MAX_C as f64;
 
 type ChangeCallback = Box<dyn Fn(Vec<SmartLevel>)>;
 
