@@ -13,6 +13,7 @@ use adw::prelude::*;
 use gtk::glib;
 use omafanctrl_core::config::Config;
 use omafanctrl_core::dbus::{SensorState, State};
+use omafanctrl_core::ec::TEMP_MAX_C;
 use omafanctrl_core::engine::sensor_display_name;
 
 use crate::chart::HistoryChart;
@@ -91,7 +92,7 @@ impl Dashboard {
         let chart = HistoryChart::new(
             &[("CPU", (0.20, 0.60, 1.00)), ("GPU", (1.00, 0.50, 0.20))],
             20.0,
-            100.0,
+            f64::from(TEMP_MAX_C),
         );
         chart_group.add(chart.widget());
 
