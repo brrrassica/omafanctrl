@@ -38,7 +38,7 @@ The remaining TPFanCtrl2 display options (`Hotkeys`, `StayOnTop`, `SlimDialog`,
 | Key | Meaning |
 | --- | --- |
 | `IgnoreSensors` | Comma-separated sensor names (or `x<hex>` offsets) to exclude |
-| `SensorName<N>` | Display name for sensor sequence `N` |
+| `SensorName<N>` | Display name for sensor sequence `N`; must not contain `;`, `#`, `//`, or newlines |
 
 ### `[FanLevels]`
 
@@ -78,4 +78,6 @@ verified E14 Gen 4 profile.
   config back through the daemon.
 
 `SetConfig` validates the document before writing, so an invalid configuration
-never reaches disk.
+never reaches disk. Sensor display names (`SensorName<N>`) additionally reject
+`;`, `#`, `//`, and newlines, which the INI format would otherwise treat as
+inline comments or line breaks and silently truncate on reload.
