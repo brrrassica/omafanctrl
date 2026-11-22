@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use omafanctrl_core::config::Config;
+use omafanctrl_core::config::{Config, General};
 use omafanctrl_core::daemon::Daemon;
 use omafanctrl_core::dbus::{self, Control, State};
 use omafanctrl_core::ec::{AccessMode, Ec, FileBackend};
@@ -67,12 +67,22 @@ async fn main() -> Result<()> {
         return revert_to_bios_auto();
     }
 
-    let config = load_config(&args.config);
-    let backend = FileBackend::open(AccessMode::ReadWrite)
+    // Startup file and EC access are synchronous (config read/parse plus a
+    // slow, contended EC open). Run them on the blocking pool so the async
+    // runtime is never stalled by storage or EC latency.
+    let config = tokio::task::spawn_blocking({
+        let path = args.config.clone();
+        move || load_config(&path)
+    })
+    .await
+    .context("configuration loader task panicked")?;
+    let backend = tokio::task::spawn_blocking(|| FileBackend::open(AccessMode::ReadWrite))
+        .await
+        .context("EC open task panicked")?
         .context("failed to open the EC; is `ec_sys write_support=1` loaded?")?;
     let ec = Ec::new(backend);
 
-    let mut daemon = Daemon::new(ec, config, args.config.clone())
+    let daemon = Daemon::new(ec, config, args.config.clone())
         .with_telemetry_interval(Duration::from_millis(args.telemetry_interval_ms.max(1)));
     let control = Control::new(daemon.control_service());
 
@@ -136,7 +146,16 @@ fn load_config(path: &Path) -> Config {
                 path = %path.display(),
                 "failed to load configuration; using defaults"
             );
-            Config::default()
+            // Fail safe: the default fallback starts in BIOS mode rather than
+            // Smart, since with no parsed `[SmartMode]` thresholds Smart control
+            // would only ever command the safety floor.
+            Config {
+                general: General {
+                    active: 0,
+                    ..General::default()
+                },
+                ..Config::default()
+            }
         }
     }
 }

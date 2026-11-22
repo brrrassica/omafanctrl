@@ -175,19 +175,31 @@ pub fn sensor_sequence(offset: u8) -> u8 {
 /// [`TEMP_MAX_C`] and `0` are filtered out before they can be published; the
 /// latter mirrors the engine's `is_usable` filter.
 ///
-/// Returns the readings and the last EC read error encountered, if any offset
-/// could not be read due to an actual read failure. An error is returned only
-/// when every requested sensor read failed.
+/// Returns the readings and an error describing why an offset could not be
+/// refreshed: a genuine EC read failure, or — for an offset that previously
+/// produced a plausible reading (see `prev_readings`) — a
+/// [`EcError::SensorUnplausible`] marker when it now returns `0` or an
+/// implausible value. The error is surfaced so the caller can treat the
+/// iteration as failed instead of silently acting on stale cached data.
+/// An offset that has never been plausible (for example an unpopulated
+/// register reading `0`) stays excluded without an error, matching
+/// TPFanCtrl2.
 pub fn read_sensor_readings<B: EcBackend>(
     ec: &mut Ec<B>,
     offsets: &[u8],
+    prev_readings: &[SensorReading],
 ) -> Result<(Vec<SensorReading>, Option<EcError>), EcError> {
     let mut readings = Vec::with_capacity(offsets.len());
     let mut last_error = None;
     for &offset in offsets {
+        // `0` marks an unavailable sensor in TPFanCtrl2, so it is not a
+        // real temperature and is excluded from published telemetry. But a
+        // sensor that *was* plausible and now reads `0` (or an implausible
+        // value) can no longer be refreshed: report it so the caller counts
+        // the iteration as failed instead of backfilling the cache forever
+        // and hiding a stuck sensor from `MaxReadErrors`.
+        let was_plausible = prev_readings.iter().any(|r| r.offset == offset);
         match ec.read_temperature(offset) {
-            // `0` marks an unavailable sensor in TPFanCtrl2, so it is not a
-            // real temperature and is excluded from published telemetry.
             Ok(celsius) if celsius > 0 => {
                 let name = default_sensor_name(offset)
                     .map(str::to_string)
@@ -198,7 +210,16 @@ pub fn read_sensor_readings<B: EcBackend>(
                     celsius,
                 });
             }
-            Ok(_) | Err(EcError::TemperatureOutOfRange { .. }) => {}
+            Ok(_) => {
+                if was_plausible {
+                    last_error = Some(EcError::SensorUnplausible { offset });
+                }
+            }
+            Err(error @ EcError::TemperatureOutOfRange { .. }) => {
+                if was_plausible {
+                    last_error = Some(error);
+                }
+            }
             Err(error) => last_error = Some(error),
         }
     }
@@ -326,6 +347,14 @@ impl Engine {
     /// The change takes effect on the next [`Engine::evaluate`].
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
+        // A level committed in another mode (typically a manually commanded
+        // level) is generally absent from the smart threshold table; keeping
+        // it would make the first Smart decision apply hysteresis against an
+        // unlisted level and silently skip the configured hold. Clear it so
+        // Smart mode re-syncs from the table, mirroring [`Engine::reset`].
+        if mode == Mode::Smart {
+            self.current_level = None;
+        }
     }
 
     /// The active smart-mode profile slot (1 or 2).
@@ -412,6 +441,10 @@ impl Engine {
             return false;
         }
         self.mode = Mode::Smart;
+        // Smart mode re-syncs its level from the threshold table; the manual
+        // level this mode is exiting from has no table entry, so clear it (see
+        // `set_mode`).
+        self.current_level = None;
         self.clear_dwell();
         true
     }
@@ -530,7 +563,9 @@ impl Engine {
 /// temperature, falling back to the first level's fan level below the first
 /// threshold. When `hysteresis` is enabled, a step up requires the temperature
 /// to clear the target threshold by its `hyst_up`, and a step down requires the
-/// temperature to fall below the current threshold by its `hyst_down`.
+/// temperature to fall below the current level's threshold by its `hyst_down`
+/// (falling back to the closest lower entry's threshold and dwell when the
+/// current level itself has no table entry).
 ///
 /// Returns `None` when no thresholds are configured.
 fn smart_target(
@@ -569,12 +604,32 @@ fn smart_target(
     } else {
         // Stepping down: require the temperature to fall below the current
         // threshold by its downward hysteresis.
-        if let Some(current_level) = levels.iter().find(|level| level.fan_level == current) {
-            if temperature
-                >= current_level
-                    .temperature
-                    .saturating_sub(current_level.hyst_down)
-            {
+        let current_hyst_down = match levels.iter().find(|level| level.fan_level == current) {
+            // The committed level is listed in the table: hold until the
+            // temperature falls below its own threshold minus its dwell.
+            Some(current_level) => {
+                if temperature
+                    >= current_level
+                        .temperature
+                        .saturating_sub(current_level.hyst_down)
+                {
+                    return Some(current);
+                }
+                None
+            }
+            // The committed level has no table entry (e.g. a manually commanded
+            // level carried across a Manual → Smart transition, or a level
+            // clamped by the safety floor or ceiling): fall back to the closest
+            // lower entry so the drop is still guarded by a configured dwell
+            // rather than silently bypassing the anti-oscillation guarantee.
+            None => levels
+                .iter()
+                .filter(|level| level.fan_level < current)
+                .max_by_key(|level| level.fan_level)
+                .map(|level| (level.temperature, level.hyst_down)),
+        };
+        if let Some((threshold, hyst_down)) = current_hyst_down {
+            if temperature >= threshold.saturating_sub(hyst_down) {
                 return Some(current);
             }
         }
@@ -851,6 +906,53 @@ mod tests {
         // 54 °C is below 60 - 5: step down to level 2.
         assert_eq!(
             engine.evaluate(&[reading(0x78, "cpu", 54)], now),
+            Decision::SetLevel(2)
+        );
+    }
+
+    #[test]
+    fn hysteresis_falls_back_to_the_closest_lower_entry_for_unlisted_levels() {
+        // Shipped profiles only define levels 1-3, but a clamped commit can
+        // leave `current` at a level absent from the table. The downward hold
+        // must fall back to the closest lower entry rather than being silently
+        // skipped (see #78).
+        let levels = vec![smart_level(50, 2, 0, 0), smart_level(60, 3, 0, 4)];
+
+        // 57 °C is still within 4 °C above the closest lower entry's 60 °C
+        // threshold minus its dwell (56): hold at the unlisted level 5.
+        assert_eq!(smart_target(&levels, 57, Some(5), true), Some(5));
+        // 55 °C is below 60 - 4: step down to the table's base level.
+        assert_eq!(smart_target(&levels, 55, Some(5), true), Some(2));
+        // Without hysteresis the drop applies immediately.
+        assert_eq!(smart_target(&levels, 55, Some(5), false), Some(2));
+        // An unlisted level with no lower entry has nothing to dwell against.
+        assert_eq!(smart_target(&levels, 55, Some(7), true), Some(2));
+        // Listed levels keep their own per-entry dwell.
+        assert_eq!(smart_target(&levels, 57, Some(3), true), Some(3));
+        assert_eq!(smart_target(&levels, 55, Some(3), true), Some(2));
+    }
+
+    #[test]
+    fn entering_smart_mode_clears_the_committed_manual_level() {
+        // A level commanded in Manual mode must not seed Smart mode's
+        // hysteresis: it has no table entry, so the first Smart decision would
+        // otherwise drop straight to the base level and skip the configured
+        // dwell (see #82).
+        let levels = vec![smart_level(50, 2, 0, 0), smart_level(60, 3, 0, 5)];
+        let mut engine = Engine::new(policy(levels));
+        engine.set_mode(Mode::Manual);
+        engine.set_manual_level(5);
+        let now = Instant::now();
+        assert_eq!(
+            engine.evaluate(&[reading(0x78, "cpu", 40)], now),
+            Decision::SetLevel(5)
+        );
+
+        engine.set_mode(Mode::Smart);
+        // With the level cleared, the first Smart decision re-syncs from the
+        // table instead of interacting with the carried-over manual level.
+        assert_eq!(
+            engine.evaluate(&[reading(0x78, "cpu", 40)], now),
             Decision::SetLevel(2)
         );
     }
@@ -1161,7 +1263,7 @@ Level=60 3 0 0
         bytes.lock().unwrap()[0x78] = 45;
         bytes.lock().unwrap()[0x7A] = 50;
         let mut ec = Ec::new(backend);
-        let (readings, read_error) = read_sensor_readings(&mut ec, &[0x78, 0x7A]).unwrap();
+        let (readings, read_error) = read_sensor_readings(&mut ec, &[0x78, 0x7A], &[]).unwrap();
         assert!(read_error.is_none());
         assert_eq!(readings[0], SensorReading::new(0x78, "cpu", 45));
         assert_eq!(readings[1], SensorReading::new(0x7A, "x7a", 50));
@@ -1177,8 +1279,63 @@ Level=60 3 0 0
         bytes.lock().unwrap()[0x7A] = 0;
         bytes.lock().unwrap()[0x7B] = 60;
         let mut ec = Ec::new(backend);
-        let (readings, read_error) = read_sensor_readings(&mut ec, &[0x78, 0x79, 0x7A, 0x7B]).unwrap();
+        // No previous sample: an always-implausible offset (an unpopulated
+        // register) stays excluded without marking the read failed.
+        let (readings, read_error) =
+            read_sensor_readings(&mut ec, &[0x78, 0x79, 0x7A, 0x7B], &[]).unwrap();
         assert!(read_error.is_none());
+        assert_eq!(
+            readings,
+            vec![
+                SensorReading::new(0x78, "cpu", 45),
+                SensorReading::new(0x7B, "x7b", 60),
+            ]
+        );
+
+        // Once a sensor has been plausible, an implausible sample means it can
+        // no longer be refreshed and must be reported so the daemon counts the
+        // iteration as failed instead of silently acting on stale data.
+        let prev = vec![SensorReading::new(0x79, "gpu", 55)];
+        let (readings, read_error) =
+            read_sensor_readings(&mut ec, &[0x78, 0x79, 0x7B], &prev).unwrap();
+        let error = read_error.expect("the previously plausible sensor must be reported");
+        assert!(
+            matches!(
+                error,
+                EcError::TemperatureOutOfRange {
+                    offset: 0x79,
+                    value: 0x80
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            readings,
+            vec![
+                SensorReading::new(0x78, "cpu", 45),
+                SensorReading::new(0x7B, "x7b", 60),
+            ]
+        );
+    }
+
+    #[test]
+    fn read_sensor_readings_reports_stuck_zero_sensor() {
+        let (backend, bytes) = SharedBackend::new();
+        bytes.lock().unwrap()[0x78] = 45;
+        // A sensor stuck at 0 °C is not a plausible reading; it must be
+        // reported (with its offset) so the daemon can count the iteration as
+        // failed instead of backfilling the cache forever.
+        bytes.lock().unwrap()[0x79] = 0;
+        bytes.lock().unwrap()[0x7B] = 60;
+        let mut ec = Ec::new(backend);
+        let prev = vec![SensorReading::new(0x79, "gpu", 55)];
+        let (readings, read_error) =
+            read_sensor_readings(&mut ec, &[0x78, 0x79, 0x7B], &prev).unwrap();
+        let error = read_error.expect("the stuck-at-zero sensor must be reported");
+        assert!(
+            matches!(error, EcError::SensorUnplausible { offset: 0x79 }),
+            "unexpected error: {error:?}"
+        );
         assert_eq!(
             readings,
             vec![

@@ -116,7 +116,9 @@ mod tests {
 
     #[test]
     fn ignored_sensors_are_hidden_by_name_or_offset() {
-        let config: Config = "IgnoreSensors=pwr,x7d\n".parse().unwrap();
+        // `Active=0` keeps the fragment valid under the empty-SmartMode
+        // validation (a Smart default would be rejected without thresholds).
+        let config: Config = "Active=0\nIgnoreSensors=pwr,x7d\n".parse().unwrap();
         let sensor = |name: &str, offset: u8| SensorState {
             name: name.to_string(),
             offset,
@@ -135,7 +137,7 @@ mod tests {
 
     #[test]
     fn enabling_a_sensor_removes_name_and_offset_entries() {
-        let mut config: Config = "IgnoreSensors=pwr,x7d\n".parse().unwrap();
+        let mut config: Config = "Active=0\nIgnoreSensors=pwr,x7d\n".parse().unwrap();
 
         // Disabled by offset only.
         let offset_ignored = SensorState {

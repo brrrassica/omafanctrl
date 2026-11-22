@@ -120,15 +120,27 @@ impl SensorsPage {
             row.connect_apply(move |row| {
                 let config = state_for_entry.config.borrow().clone();
                 if let Some(mut config) = config {
-                    let display = row.text().to_string();
-                    // SensorName entries are keyed by the sensor's stable
+                    // `;`, `#`, and `//` would be parsed as inline comments on
+                    // reload, silently truncating the name; keep the stored
+                    // value trimmed so validation never sees stray whitespace.
+                    let display = row.text().trim().to_string();
+                    if display.contains([';', '#', '\n', '\r']) || display.contains("//") {
+                        state_for_entry.toast(
+                            "Names cannot contain ; # // or newlines (they would corrupt the config file)",
+                        );
+                        return;
+                    }                    // SensorName entries are keyed by the sensor's stable
                     // sequence, never by the editable display text, so a rename
                     // survives the next rebuild.
                     let sequence = sensor_sequence(offset_for_entry);
                     config.sensors.names.retain(|key, value| {
                         *key == sequence || value.as_str() != name_for_entry.as_str()
                     });
-                    config.sensors.names.insert(sequence, display);
+                    if display.is_empty() {
+                        config.sensors.names.remove(&sequence);
+                    } else {
+                        config.sensors.names.insert(sequence, display);
+                    }
                     state_for_entry.set_config(&config);
                 }
             });

@@ -5,6 +5,97 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.7] - 2026-11-21
+
+### Fixed
+
+- **Smart-mode downward hysteresis honours unlisted committed levels** and
+  entering Smart mode (via `SetMode` or the thermal manual-exit) clears the
+  committed level, so the configured `hyst_down` hold is never skipped after a
+  Manual → Smart transition.
+  ([#78](https://github.com/brrrassica/omafanctrl/issues/78),
+  [#82](https://github.com/brrrassica/omafanctrl/issues/82),
+  [#87](https://github.com/brrrassica/omafanctrl/issues/87))
+- **Validation rejects configurations the engine cannot honour.**
+  `ManModeExit=127` (the strict exit check can never trigger at the reading
+  cap), `ManFanSpeed=0` (the EC rejects level `0x00`), and smart hysteresis
+  values that saturate the step-up/step-down comparisons are all rejected at
+  parse time.
+  ([#77](https://github.com/brrrassica/omafanctrl/issues/77),
+  [#85](https://github.com/brrrassica/omafanctrl/issues/85),
+  [#88](https://github.com/brrrassica/omafanctrl/issues/88))
+- **Chart and curve-editor axes cover the full `0..=TEMP_MAX_C` range**
+  instead of hard-coding 100 °C, so valid readings above 100 °C are no longer
+  pinned to the top/right edge.
+  ([#84](https://github.com/brrrassica/omafanctrl/issues/84),
+  [#89](https://github.com/brrrassica/omafanctrl/issues/89))
+
+## [1.1.6] - 2026-11-20
+
+### Fixed
+
+- **Sensor display names that cannot round-trip are rejected.** A
+  `SensorName<N>` value containing `;`, `#`, `//`, or a newline was written
+  verbatim and then truncated (or broke the line structure) on the next parse,
+  silently losing the label after a restart or reload. `Config::validate` now
+  reports `InvalidSensorName` for such values (and for leading/trailing
+  whitespace, which the parser would trim away), the parser rejects
+  `SensorName` lines carrying an inline-comment marker outright, and the
+  Sensors page trims and refuses such names with a toast instead of persisting
+  them. ([#91](https://github.com/brrrassica/omafanctrl/issues/91))
+- **Smart-mode downward hysteresis honours unlisted committed levels.** A
+  committed level without a `smart_levels` entry (a manually commanded level
+  carried across a Manual → Smart transition, or a level clamped by the safety
+  floor/ceiling) made the step-down lookup fail and silently skipped the
+  configured `hyst_down` hold; the dwell now falls back to the closest lower
+  table entry.
+  ([#78](https://github.com/brrrassica/omafanctrl/issues/78),
+  [#82](https://github.com/brrrassica/omafanctrl/issues/82))
+- **Entering Smart mode clears the committed level.** Switching Manual → Smart
+  re-syncs hysteresis from the threshold table instead of holding anti-drop
+  state against a level absent from it.
+  ([#82](https://github.com/brrrassica/omafanctrl/issues/82))
+- **Validation rejects `ManModeExit=127`.** The exit check is strict and
+  readings are capped at `TEMP_MAX_C`, so a threshold at the ceiling could
+  never trigger and silently disabled the Manual-mode safety exit; the accepted
+  range is now `0..=126`.
+  ([#77](https://github.com/brrrassica/omafanctrl/issues/77))
+- **Validation rejects `ManFanSpeed=0`.** The EC rejects level `0x00` and the
+  engine silently substituted the safety floor, diverging from the configured
+  value; `ManFanSpeed` must now be `1..=7` and the shipped profiles set `3`.
+  ([#85](https://github.com/brrrassica/omafanctrl/issues/85))
+- **Telemetry no longer consumes the `MaxReadErrors` budget.** The 4 Hz
+  telemetry sample and the control tick had shared one consecutive-error
+  counter, so at the default cadence a burst of EC read failures aborted the
+  daemon after ~2.5 s instead of the documented 10 control cycles — and any
+  successful telemetry sample masked a control path failing every cycle.
+  ([#74](https://github.com/brrrassica/omafanctrl/issues/74))
+- **A stalled fan is flagged instead of reported healthy.** A tachometer read
+  of 0 RPM while the engine commands a nonzero fan level is now treated as a
+  failed read: the last known RPM is kept for telemetry and the iteration
+  counts toward `MaxReadErrors`. A genuine 0 RPM in BIOS-auto or idle is still
+  accepted. ([#71](https://github.com/brrrassica/omafanctrl/issues/71))
+- **Implausible sensor reads count toward the error budget.** Sensors stuck at
+  zero or returning out-of-range temperatures were silently replaced by the
+  last cached value and reset the error streak, letting control run on frozen
+  temperatures; they are now reported as per-iteration errors and partial
+  failures mark the whole iteration. ([#66](https://github.com/brrrassica/omafanctrl/issues/66))
+- **Runtime mode and manual level persist consistently.** `SetMode` and
+  `SetManualLevel` persist their own changes (with watcher sync), the thermal
+  safety manual-exit persists the new mode, and cycling BIOS → Manual → Smart
+  preserves the selected Smart slot instead of reverting to Smart 1.
+  ([#70](https://github.com/brrrassica/omafanctrl/issues/70),
+  [#67](https://github.com/brrrassica/omafanctrl/issues/67),
+  [#69](https://github.com/brrrassica/omafanctrl/issues/69))
+- **The curve page edits the Smart slot the engine actually drives.**
+  ([#75](https://github.com/brrrassica/omafanctrl/issues/75))
+- **Threshold-less Smart configurations are rejected, and reload honours
+  `Active`.** A config with `Active=1/2` but no `[SmartMode]` sections is now
+  invalid, the config-load fallback fails safe to BIOS, and a reloaded
+  configuration re-applies the mode from `[General] Active`.
+  ([#73](https://github.com/brrrassica/omafanctrl/issues/73),
+  [#59](https://github.com/brrrassica/omafanctrl/issues/59))
+
 ## [1.1.5] - 2026-11-18
 
 ### Fixed
@@ -80,6 +171,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration is kept, and a genuinely fatal loop error now exits the daemon
   non-zero so systemd can restart it.
 
+[1.1.7]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.7
+[1.1.6]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.6
 [1.1.5]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.5
 [1.1.4]: https://github.com/brrrassica/omafanctrl/releases/tag/v1.1.4
 [1.1.3]: https://github.com/omafanctrl/omafanctrl/releases/tag/v1.1.3

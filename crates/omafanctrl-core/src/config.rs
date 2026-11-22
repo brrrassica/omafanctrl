@@ -115,13 +115,15 @@ pub enum ValidationError {
     #[error("`Cycle` must be at least 1 second, got {0}")]
     CycleTooSmall(u32),
 
-    /// `ManFanSpeed` was outside `0..=7`.
-    #[error("`ManFanSpeed` must be 0..=7, got {0}")]
+    /// `ManFanSpeed` was outside `1..=7` (`0` is the TPFanCtrl2 "off"
+    /// encoding; the EC rejects it and the engine would silently substitute
+    /// the safety floor).
+    #[error("`ManFanSpeed` must be 1..=7, got {0}")]
     ManFanSpeedOutOfRange(u8),
 
-    /// `ManModeExit` exceeded the sensor ceiling, making the Manual-mode safety
-    /// exit unreachable.
-    #[error("`ManModeExit` must be 0..={TEMP_MAX_C} °C, got {0}")]
+    /// `ManModeExit` was at or above the sensor ceiling, making the
+    /// Manual-mode safety exit unreachable.
+    #[error("`ManModeExit` must be 0..={} °C, got {}", TEMP_MAX_C - 1, .0)]
     ManModeExitOutOfRange(u8),
 
     /// `IconLevels` did not contain exactly three temperatures.
@@ -158,6 +160,14 @@ pub enum ValidationError {
     #[error("at most {MAX_SMART_MODES} smart modes are supported, got {0}")]
     TooManySmartModes(usize),
 
+    /// `Active` selected Smart mode but no smart mode is defined, so the engine
+    /// would have no thresholds and would command only the safety floor.
+    #[error(
+        "`Active` selects Smart mode but no smart mode is defined; \
+         add a `Level=` entry or set `Active=0`"
+    )]
+    SmartModeMissing,
+
     /// A smart mode defined no `Level` entries.
     #[error("smart mode {mode} must define at least one `Level`")]
     SmartModeEmpty {
@@ -183,6 +193,35 @@ pub enum ValidationError {
         level: u8,
     },
 
+    /// A smart mode's downward hysteresis reached its threshold, so the
+    /// saturating subtraction would hold the current level forever.
+    #[error(
+        "smart mode {mode} hystDown {hyst_down} must be less than its threshold {temperature} °C"
+    )]
+    SmartHystDownOutOfRange {
+        /// The 1-based smart mode number.
+        mode: usize,
+        /// The level's threshold temperature.
+        temperature: u8,
+        /// The offending hysteresis.
+        hyst_down: u8,
+    },
+
+    /// A smart mode's upward hysteresis saturated past the sensor ceiling when
+    /// added to its threshold, making the step-up unreachable.
+    #[error(
+        "smart mode {mode} hystUp {hyst_up} at {temperature} °C must not saturate past {} °C",
+        TEMP_MAX_C
+    )]
+    SmartHystUpOutOfRange {
+        /// The 1-based smart mode number.
+        mode: usize,
+        /// The level's threshold temperature.
+        temperature: u8,
+        /// The offending hysteresis.
+        hyst_up: u8,
+    },
+
     /// A smart mode's temperatures were not strictly ascending.
     #[error("smart mode {mode} temperatures must be strictly ascending, got {temperatures:?}")]
     SmartTemperaturesNotAscending {
@@ -204,6 +243,20 @@ pub enum ValidationError {
     /// The ignore list contained an empty sensor name.
     #[error("`IgnoreSensors` contains an empty sensor name")]
     EmptySensorName,
+
+    /// A sensor display name could not survive an `.ini` round-trip: it
+    /// contained an inline-comment marker or a newline, or started or ended
+    /// with whitespace, so the next parse would truncate or drop it.
+    #[error(
+        "`SensorName{sequence}` display name `{name}` must not contain \
+         `;`, `#`, `//`, or a newline, and must not start or end with whitespace"
+    )]
+    InvalidSensorName {
+        /// The sensor sequence number of the offending name.
+        sequence: u8,
+        /// The offending display name.
+        name: String,
+    },
 }
 
 /// The `[General]` section.
@@ -270,7 +323,7 @@ impl Default for General {
         Self {
             active: 2,
             cycle: 5,
-            man_fan_speed: 0,
+            man_fan_speed: 1,
             man_mode_exit: 78,
             max_read_errors: 10,
             process_priority: 2,
@@ -401,15 +454,19 @@ impl Config {
         if general.cycle == 0 {
             return Err(ValidationError::CycleTooSmall(general.cycle));
         }
-        if general.man_fan_speed > FAN_LEVEL_MAX {
+        // The EC rejects `0x00` ("off") outright, and `Engine::set_manual_level`
+        // would silently substitute the safety floor, diverging from the
+        // configured value; manual levels are `1..=7`.
+        if !(FAN_LEVEL_MIN..=FAN_LEVEL_MAX).contains(&general.man_fan_speed) {
             return Err(ValidationError::ManFanSpeedOutOfRange(
                 general.man_fan_speed,
             ));
         }
-        // Usable sensor readings are capped at `TEMP_MAX_C`, so an exit
-        // threshold above it could never be reached and would silently disable
-        // the Manual-mode safety exit.
-        if general.man_mode_exit > TEMP_MAX_C {
+        // Usable sensor readings are capped at `TEMP_MAX_C`, and the exit check
+        // is strict (`max_temperature > man_mode_exit`), so a threshold at or
+        // above the cap could never be reached and would silently disable the
+        // Manual-mode safety exit.
+        if general.man_mode_exit >= TEMP_MAX_C {
             return Err(ValidationError::ManModeExitOutOfRange(
                 general.man_mode_exit,
             ));
@@ -463,6 +520,27 @@ impl Config {
                         level: level.fan_level,
                     });
                 }
+                // A step-up threshold plus `hyst_up` must remain within the
+                // usable sensor range: saturating addition past `TEMP_MAX_C`
+                // would make the step-up unreachable, silently disabling the
+                // level.
+                if level.temperature.saturating_add(level.hyst_up) > TEMP_MAX_C {
+                    return Err(ValidationError::SmartHystUpOutOfRange {
+                        mode: mode_number,
+                        temperature: level.temperature,
+                        hyst_up: level.hyst_up,
+                    });
+                }
+                // A downward hysteresis at or above its threshold saturates the
+                // step-down comparison to 0 °C, so the engine would hold the
+                // current level forever as the machine cools.
+                if level.hyst_down >= level.temperature {
+                    return Err(ValidationError::SmartHystDownOutOfRange {
+                        mode: mode_number,
+                        temperature: level.temperature,
+                        hyst_down: level.hyst_down,
+                    });
+                }
                 temperatures.push(level.temperature);
                 fan_levels.push(level.fan_level);
             }
@@ -480,6 +558,15 @@ impl Config {
             }
         }
 
+        // `Active` 1 or 2 selects Smart mode. With no smart mode defined the
+        // engine has an empty threshold list and would command only the safety
+        // floor for every temperature below the emergency ceiling, so such a
+        // configuration is rejected (fail safe: `Active=0` hands the fan to
+        // the firmware).
+        if (general.active == 1 || general.active == 2) && self.smart_modes.is_empty() {
+            return Err(ValidationError::SmartModeMissing);
+        }
+
         if self
             .sensors
             .ignore
@@ -487,6 +574,14 @@ impl Config {
             .any(|name| name.trim().is_empty())
         {
             return Err(ValidationError::EmptySensorName);
+        }
+        for (&sequence, name) in &self.sensors.names {
+            if name.trim() != name || name.contains([';', '#', '\n', '\r']) || name.contains("//") {
+                return Err(ValidationError::InvalidSensorName {
+                    sequence,
+                    name: name.clone(),
+                });
+            }
         }
 
         Ok(())
@@ -754,6 +849,23 @@ fn parse_raw(input: &str) -> Result<RawIni, ConfigError> {
         let value = value.trim().to_string();
 
         let (target, normalized_key) = route(section.as_deref(), &key);
+        if target == Target::Sensors && normalized_key.starts_with("sensorname") {
+            // `value` comes from the comment-stripped content, so a name such
+            // as `CPU; core` is already truncated to `CPU` at this point. Check
+            // the raw right-hand side instead and report the corruption rather
+            // than silently storing a truncated display name.
+            let raw_value = trimmed.split_once('=').map(|(_, rhs)| rhs.trim());
+            if let Some(raw_value) = raw_value {
+                if strip_inline_comment(raw_value) != raw_value {
+                    return Err(ConfigError::InvalidValue {
+                        line: line_number,
+                        key: normalized_key,
+                        value: raw_value.to_string(),
+                        reason: "value contains an inline comment marker".to_string(),
+                    });
+                }
+            }
+        }
         match target {
             Target::General => {
                 raw.general.push((normalized_key, value, line_number));
@@ -1119,7 +1231,6 @@ impl ConfigWatcher {
         self.last = Some(FileStamp::from_contents(&contents));
         Ok(config)
     }
-
 }
 
 #[cfg(test)]
@@ -1136,7 +1247,7 @@ mod tests {
 
 Hotkeys=1
 Active=2
-ManFanSpeed=0
+ManFanSpeed=3
 ManModeExit=78
 StayOnTop=1
 SlimDialog=0
@@ -1190,7 +1301,7 @@ Level=60  3  0  0     // 60°C and above → Fan level 3
 
 Hotkeys=1
 Active=2
-ManFanSpeed=0
+ManFanSpeed=3
 ManModeExit=78
 StayOnTop=1
 SlimDialog=0
@@ -1314,8 +1425,8 @@ Level=60  3  0  0
 
     #[test]
     fn keys_are_case_insensitive() {
-        let config: Config = "[GENERAL]\nACTIVE=1\nCYCLE=9\n".parse().unwrap();
-        assert_eq!(config.general.active, 1);
+        let config: Config = "[GENERAL]\nACTIVE=3\nCYCLE=9\n".parse().unwrap();
+        assert_eq!(config.general.active, 3);
         assert_eq!(config.general.cycle, 9);
     }
 
@@ -1336,9 +1447,9 @@ Level=60  3  0  0
 
     #[test]
     fn supports_semicolon_and_hash_comments() {
-        let input = "; a comment\n# another\nActive=1 ; inline\nCycle=7 # inline\n";
+        let input = "; a comment\n# another\nActive=3 ; inline\nCycle=7 # inline\nLevel=50 2 0 0\n";
         let config: Config = input.parse().unwrap();
-        assert_eq!(config.general.active, 1);
+        assert_eq!(config.general.active, 3);
         assert_eq!(config.general.cycle, 7);
     }
 
@@ -1396,7 +1507,7 @@ Level2=55 3 0 0
     fn preserves_unknown_keys_and_sections() {
         let input = "\
 [General]
-Active=1
+Active=3
 CustomThing=hello
 
 [Weird]
@@ -1473,7 +1584,87 @@ Foo=bar
             error,
             ConfigError::Validation(ValidationError::ManModeExitOutOfRange(128))
         ));
-        assert!("ManModeExit=127\n".parse::<Config>().is_ok());
+        assert!(
+            "ManModeExit=126\nLevel=50 2 0 0\n"
+                .parse::<Config>()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_smart_mode_missing_when_active_selects_smart() {
+        // `Active=1`/`Active=2` require at least one smart mode: otherwise the
+        // engine's threshold list is empty and Smart control would command only
+        // the safety floor for every temperature below the emergency ceiling.
+        let error = "Active=2\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::SmartModeMissing)
+        ));
+        // BIOS and Manual startup modes do not require a smart mode.
+        assert!("Active=0\n".parse::<Config>().is_ok());
+        assert!("Active=3\n".parse::<Config>().is_ok());
+    }
+
+    #[test]
+    fn rejects_sensor_names_that_cannot_round_trip() {
+        // A `;`, `#`, or `//` would be parsed as an inline comment and a
+        // newline would break the `key=value` line structure, so the name
+        // would silently truncate or vanish on the next parse.
+        for (name, expected) in [
+            ("CPU; core", "CPU; core"),
+            ("CPU #1", "CPU #1"),
+            ("CPU //die", "CPU //die"),
+        ] {
+            let error = format!("Active=0\nSensorName0={name}\n")
+                .parse::<Config>()
+                .unwrap_err();
+            match error {
+                ConfigError::Validation(ValidationError::InvalidSensorName {
+                    sequence,
+                    name: stored,
+                }) => {
+                    assert_eq!(sequence, 0);
+                    assert_eq!(stored, expected);
+                }
+                ConfigError::InvalidValue { value: stored, .. } => {
+                    assert_eq!(stored, expected);
+                }
+                other => panic!("unexpected error for {name:?}: {other:?}"),
+            }
+        }
+        // Leading/trailing whitespace is trimmed on parse, so it can never be
+        // stored via the parser — but `validate` still rejects it because the
+        // GUI can insert untrimmed names directly.
+        let mut config: Config = "Active=0\nSensorName0=CPU\n".parse().unwrap();
+        config.sensors.names.insert(1, " padded".to_string());
+        assert!(matches!(
+            config.validate(),
+            Err(ValidationError::InvalidSensorName { sequence: 1, .. })
+        ));
+        // An embedded newline breaks the `key=value` line structure outright.
+        let error = "Active=0\nSensorName0=CPU\ndie\n"
+            .parse::<Config>()
+            .unwrap_err();
+        assert!(matches!(error, ConfigError::MalformedLine { line: 3, .. }));
+        // Names without INI-breaking characters are still accepted, including
+        // `=`, which survives the round-trip because it splits on the first `=`.
+        assert!(
+            "Active=0\nSensorName0=CPU (PECI)\n"
+                .parse::<Config>()
+                .is_ok()
+        );
+        assert!("Active=0\nSensorName0=peak=60\n".parse::<Config>().is_ok());
+    }
+
+    #[test]
+    fn sensor_names_round_trip_through_to_ini() {
+        let config: Config = "Active=0\nSensorName0=CPU (PECI)\nSensorName12=x7c\n"
+            .parse()
+            .unwrap();
+        let rendered = config.to_ini();
+        let reparsed: Config = rendered.parse().unwrap();
+        assert_eq!(config, reparsed);
     }
 
     #[test]
@@ -1484,6 +1675,37 @@ Foo=bar
             error,
             ConfigError::Validation(ValidationError::SmartTemperaturesNotAscending { mode: 1, .. })
         ));
+    }
+
+    #[test]
+    fn rejects_saturating_smart_hysteresis() {
+        // `hystUp` saturating past the sensor ceiling makes the step-up
+        // unreachable, so the engine could never advance to that level.
+        let error = "Level=120 2 20 0\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::SmartHystUpOutOfRange {
+                mode: 1,
+                temperature: 120,
+                hyst_up: 20
+            })
+        ));
+        // `hystDown` at the threshold saturates the step-down comparison to
+        // 0 °C, so the engine would hold the level forever while cooling.
+        let error = "Level=50 2 0 50\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::SmartHystDownOutOfRange {
+                mode: 1,
+                temperature: 50,
+                hyst_down: 50
+            })
+        ));
+        // Boundary values stay accepted: a step-down guard that still leaves a
+        // usable band, and an exact step-up comparison at the ceiling.
+        assert!("Level=50 2 0 49\n".parse::<Config>().is_ok());
+        assert!("Level=127 2 0 0\n".parse::<Config>().is_ok());
+        assert!("Level=110 2 17 0\n".parse::<Config>().is_ok());
     }
 
     #[test]
@@ -1514,9 +1736,20 @@ Foo=bar
     }
 
     #[test]
-    fn accepts_man_mode_exit_at_the_sensor_ceiling() {
-        let config: Config = "ManModeExit=127\n".parse().unwrap();
-        assert_eq!(config.general.man_mode_exit, TEMP_MAX_C);
+    fn rejects_man_mode_exit_at_the_sensor_ceiling() {
+        // The exit check is strict (`max_temperature > man_mode_exit`) and
+        // readings are capped at `TEMP_MAX_C`, so a threshold at the ceiling
+        // can never trigger and would silently disable the safety exit.
+        let error = "ManModeExit=127\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::ManModeExitOutOfRange(127))
+        ));
+        assert!(
+            "ManModeExit=126\nLevel=50 2 0 0\n"
+                .parse::<Config>()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1525,6 +1758,24 @@ Foo=bar
         assert!(matches!(
             error,
             ConfigError::Validation(ValidationError::ManModeExitOutOfRange(128))
+        ));
+    }
+
+    #[test]
+    fn rejects_man_fan_speed_below_the_level_range() {
+        // `0` is the TPFanCtrl2 "off" encoding; the EC rejects it, so the
+        // engine would silently substitute the safety floor instead.
+        let error = "ManFanSpeed=0\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::ManFanSpeedOutOfRange(0))
+        ));
+        assert!("Active=3\nManFanSpeed=1\n".parse::<Config>().is_ok());
+        assert!("Active=3\nManFanSpeed=7\n".parse::<Config>().is_ok());
+        let error = "Active=3\nManFanSpeed=8\n".parse::<Config>().unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(ValidationError::ManFanSpeedOutOfRange(8))
         ));
     }
 
@@ -1580,9 +1831,9 @@ Foo=bar
     #[test]
     fn loads_from_a_file() {
         let path = temp_path("load");
-        std::fs::write(&path, "Active=1\nCycle=3\n").unwrap();
+        std::fs::write(&path, "Active=3\nCycle=3\nLevel=50 2 0 0\n").unwrap();
         let config = Config::from_file(&path).unwrap();
-        assert_eq!(config.general.active, 1);
+        assert_eq!(config.general.active, 3);
         assert_eq!(config.general.cycle, 3);
         std::fs::remove_file(&path).ok();
     }
@@ -1597,17 +1848,17 @@ Foo=bar
     #[test]
     fn watcher_reports_first_load_then_only_changes() {
         let path = temp_path("watch");
-        std::fs::write(&path, "Active=1\nCycle=3\n").unwrap();
+        std::fs::write(&path, "Active=3\nCycle=3\nLevel=50 2 0 0\n").unwrap();
         let mut watcher = ConfigWatcher::new(&path);
 
         let first = watcher.poll().unwrap();
-        assert_eq!(first.unwrap().general.active, 1);
+        assert_eq!(first.unwrap().general.active, 3);
         // Unchanged contents: no reload.
         assert!(watcher.poll().unwrap().is_none());
 
-        std::fs::write(&path, "Active=2\nCycle=3\n").unwrap();
+        std::fs::write(&path, "Active=0\nCycle=3\nLevel=50 2 0 0\n").unwrap();
         let changed = watcher.poll().unwrap();
-        assert_eq!(changed.unwrap().general.active, 2);
+        assert_eq!(changed.unwrap().general.active, 0);
         assert!(watcher.poll().unwrap().is_none());
 
         std::fs::remove_file(&path).ok();
@@ -1616,11 +1867,11 @@ Foo=bar
     #[test]
     fn watcher_force_reload_ignores_fingerprint() {
         let path = temp_path("reload");
-        std::fs::write(&path, "Active=1\n").unwrap();
+        std::fs::write(&path, "Active=3\nLevel=50 2 0 0\n").unwrap();
         let mut watcher = ConfigWatcher::new(&path);
         watcher.poll().unwrap();
         let reloaded = watcher.reload().unwrap();
-        assert_eq!(reloaded.general.active, 1);
+        assert_eq!(reloaded.general.active, 3);
         std::fs::remove_file(&path).ok();
     }
 
@@ -1681,11 +1932,14 @@ Foo=bar
             "IconLevels=65,75,80",
             "FanBeep=1",
             "SensorName=",
+            "SensorName0=bad;name",
+            "SensorName0=bad#name",
+            "SensorName0=bad//name",
             "SensorName999999999999999999999=x",
             "IgnoreSensors=,,,",
             "IgnoreSensors=pwr,no5",
             "\u{0}\u{1}\u{2}",
-            "Active=1\r\nCycle=2\r\n",
+            "Active=3\r\nCycle=2\r\n",
             "Level=50 2 0 0\nLevel=40 1 0 0\n",
             "[Weird]\nFoo=bar\n",
             "// comment only\n",

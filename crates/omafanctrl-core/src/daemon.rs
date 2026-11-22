@@ -68,7 +68,15 @@ pub struct Daemon<B: EcBackend> {
     commands: mpsc::Receiver<Command>,
     config_path: PathBuf,
     telemetry_interval: Duration,
-    /// Consecutive control/sample iterations with at least one failed EC read.
+    /// Consecutive *control* iterations with at least one failed EC read.
+    ///
+    /// `MaxReadErrors` is documented per control `Cycle`, so only the control
+    /// cadence counts toward the abort budget. Telemetry samples run at 4 Hz
+    /// and must neither consume nor reset this budget: a shared counter made
+    /// the daemon abort after ~2.5 s of EC contention instead of 10 control
+    /// cycles, and any successful telemetry sample masked a control path
+    /// failing every cycle. Telemetry failures are logged and surfaced through
+    /// the last-known-good snapshot instead.
     read_errors: u32,
     /// The last successfully read sensor bank, used to fill in sensors whose
     /// read failed on the current iteration.
@@ -172,27 +180,52 @@ impl<B: EcBackend> Daemon<B> {
     /// partial read where some offsets failed) marks the iteration as failed,
     /// so the control path can retain its last decision instead of acting on
     /// incomplete or stale data. A failed tachometer read keeps the last known
-    /// RPM and also marks the iteration as failed. After
-    /// [`General::max_read_errors`] consecutive failed iterations an error is
-    /// returned so the daemon exits and the watchdog reverts the fan.
+    /// RPM and also marks the iteration as failed. A tachometer reading of 0
+    /// RPM while the engine commands a nonzero fan level is implausible (a
+    /// stalled fan, a disconnected tachometer, or a bad EC read): it also keeps
+    /// the last known RPM and marks the iteration as failed. After
+    /// [`General::max_read_errors`] consecutive failed *control* iterations an
+    /// error is returned so the daemon exits and the watchdog reverts the fan.
+    ///
+    /// Telemetry-only samples (see `sample`) do not count toward this budget
+    /// and do not reset it: `MaxReadErrors` is a per-`Cycle` budget, and the
+    /// 4 Hz telemetry cadence would otherwise consume it 16x faster than
+    /// documented (or mask a control-path failure streak with a 4 Hz reset).
     ///
     /// [`General::max_read_errors`]: crate::config::General::max_read_errors
-    fn read_sensors(&mut self) -> Result<(Vec<SensorReading>, u16, bool), EngineError> {
+    fn read_sensors(
+        &mut self,
+        count_toward_budget: bool,
+    ) -> Result<(Vec<SensorReading>, u16, bool), EngineError> {
         let mut last_error = None;
-        let (readings, sensors_failed) =
-            match read_sensor_readings(self.watchdog.ec_mut(), &self.sensor_offsets) {
-                Ok((readings, sensor_error)) => {
-                    if let Some(error) = sensor_error {
-                        last_error = Some(error);
-                    }
-                    (readings, last_error.is_some())
-                }
-                Err(error) => {
+        let (readings, sensors_failed) = match read_sensor_readings(
+            self.watchdog.ec_mut(),
+            &self.sensor_offsets,
+            &self.last_readings,
+        ) {
+            Ok((readings, sensor_error)) => {
+                if let Some(error) = sensor_error {
                     last_error = Some(error);
-                    (Vec::new(), true)
                 }
-            };
+                (readings, last_error.is_some())
+            }
+            Err(error) => {
+                last_error = Some(error);
+                (Vec::new(), true)
+            }
+        };
         let (fan_rpm, fan_failed) = match self.watchdog.ec_mut().read_fan_rpm() {
+            // While the engine commands a nonzero fan level, a tachometer read
+            // of 0 RPM is implausible: the fan cannot be stationary while it is
+            // being driven. Treat it like a failed read so a stalled fan (or a
+            // disconnected tachometer, or a bad EC read) accumulates toward
+            // `MaxReadErrors` instead of silently resetting the error streak,
+            // and keep the last known RPM for telemetry. A genuine 0 RPM in
+            // BIOS-auto or idle is accepted.
+            Ok(0) if self.engine.current_level().is_some_and(|level| level > 0) => {
+                last_error.get_or_insert(EcError::FanRpmUnplausible { value: 0 });
+                (self.last_fan_rpm, true)
+            }
             Ok(fan_rpm) => (fan_rpm, false),
             Err(error) => {
                 last_error.get_or_insert(error);
@@ -207,12 +240,16 @@ impl<B: EcBackend> Daemon<B> {
         };
 
         if sensors_failed || fan_failed {
-            self.read_errors = self.read_errors.saturating_add(1);
-            if self.read_errors > self.config.general.max_read_errors {
-                let error = last_error.expect("a failed read iteration must carry an EC error");
-                return Err(error.into());
+            if count_toward_budget {
+                self.read_errors = self.read_errors.saturating_add(1);
+                if self.read_errors > self.config.general.max_read_errors {
+                    let error = last_error.expect("a failed read iteration must carry an EC error");
+                    return Err(error.into());
+                }
+            } else {
+                tracing::debug!(?last_error, "telemetry sample hit a failed EC read");
             }
-        } else {
+        } else if count_toward_budget {
             self.read_errors = 0;
         }
 
@@ -243,14 +280,23 @@ impl<B: EcBackend> Daemon<B> {
     /// Run one control iteration.
     pub fn tick(&mut self, now: Instant) -> Result<(), EngineError> {
         self.poll_config();
-        let (readings, fan_rpm, read_failed) = self.read_sensors()?;
+        let (readings, fan_rpm, read_failed) = self.read_sensors(true)?;
         if read_failed {
             // Keep the last commanded level and publish the retained snapshot
             // rather than acting on partial or stale sensor data.
             self.publish_state(&readings, fan_rpm);
             return Ok(());
         }
-        self.engine.exit_manual_if_hot(&readings);
+        if self.engine.exit_manual_if_hot(&readings) {
+            // The thermal safety exit took over from Manual, so mirror the
+            // `SetMode` bookkeeping: record the new mode in the live config
+            // and persist it. Otherwise any later `persist_config` (for
+            // example `SetHysteresis`) would write `Active=3` to disk and a
+            // restart would silently boot back into the unsafe Manual mode.
+            self.config.general.active = self.engine.active_smart_profile();
+            self.persist_config();
+            let _ = self.config_tx.send(self.config.to_ini());
+        }
         let decision = self.engine.decide(&readings, now);
         match apply_decision(self.watchdog.ec_mut(), decision) {
             Ok(()) => self.engine.commit(decision, now),
@@ -274,7 +320,9 @@ impl<B: EcBackend> Daemon<B> {
     /// This drives the fast telemetry cadence so the GUI's temperature history
     /// stays fresh between control iterations, without touching the fan.
     pub fn sample(&mut self) -> Result<(), EngineError> {
-        let (readings, fan_rpm, _) = self.read_sensors()?;
+        // Telemetry never consumes or resets the control-path error budget
+        // (`MaxReadErrors` is a per-Cycle budget); see `read_sensors`.
+        let (readings, fan_rpm, _) = self.read_sensors(false)?;
         self.publish_state(&readings, fan_rpm);
         Ok(())
     }
@@ -284,20 +332,31 @@ impl<B: EcBackend> Daemon<B> {
         match command {
             Command::SetMode(mode) => {
                 self.engine.set_mode(mode);
-                if mode == Mode::Smart {
-                    self.engine.set_active_smart_profile(preferred_smart_slot(
-                        self.config.general.active,
-                    ));
-                }
+                // Do not re-derive the smart profile slot from the live config:
+                // while outside Smart mode `config.general.active` holds the
+                // transient BIOS/Manual encoding (0/3), so re-deriving here
+                // would clobber the user's Smart slot selection on re-entry.
+                // The engine keeps its slot across non-Smart modes; it is only
+                // re-derived from the config in `apply_config`.
                 self.config.general.active = match mode {
                     Mode::Bios => 0,
                     Mode::Manual => 3,
                     Mode::Smart => self.engine.active_smart_profile(),
                 };
+                // Persist runtime mode changes so explicit/external reloads and
+                // restarts do not revert to stale file-backed values, and keep the
+                // watcher in sync like other self-writes.
+                self.persist_config();
+                let _ = self.config_tx.send(self.config.to_ini());
             }
             Command::SetManualLevel(level) => {
                 self.engine.set_manual_level(level);
                 self.config.general.man_fan_speed = self.engine.manual_level();
+                // Persist runtime manual speed changes so reloads/restarts do not
+                // revert them and unrelated persistence does not have to capture
+                // them as a side effect.
+                self.persist_config();
+                let _ = self.config_tx.send(self.config.to_ini());
             }
             Command::SetHysteresis(enabled) => {
                 self.config.general.hysteresis = enabled;
@@ -321,7 +380,7 @@ impl<B: EcBackend> Daemon<B> {
                     );
                 }
             },
-            Command::ReloadConfig => match Config::from_file(&self.config_path) {
+            Command::ReloadConfig => match self.watcher.reload() {
                 Ok(config) => self.apply_config(config),
                 Err(error) => {
                     tracing::warn!(
@@ -344,11 +403,17 @@ impl<B: EcBackend> Daemon<B> {
     /// comes from `[General] Cycle` in the live configuration and is re-read
     /// after every control tick, so a configuration reload takes effect without
     /// restarting the daemon.
+    ///
+    /// Blocking EC I/O and fan-apply verification run on Tokio's blocking pool so
+    /// the async runtime is not stalled by slow or contended EC access.
     pub async fn run(
-        &mut self,
+        mut self,
         interval: Option<Duration>,
         mut shutdown: watch::Receiver<bool>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<(), EngineError>
+    where
+        B: 'static,
+    {
         // Sample and publish at the telemetry cadence, but drive the fan
         // control decision from its own deadline. Sharing one ticker made the
         // effective control cadence `max(telemetry_interval, Cycle)`, so a long
@@ -370,14 +435,24 @@ impl<B: EcBackend> Daemon<B> {
                 }
             };
             match event {
-                LoopEvent::Telemetry => self.sample()?,
+                LoopEvent::Telemetry => {
+                    self = tokio::task::spawn_blocking(move || self.sample().map(|()| self))
+                        .await
+                        .map_err(|_| EngineError::Panicked)??;
+                }
                 LoopEvent::Control => {
                     let now = Instant::now();
-                    self.tick(now)?;
-                    next_control = now + self.control_interval(interval);
+                    self = tokio::task::spawn_blocking(move || self.tick(now).map(|()| self))
+                        .await
+                        .map_err(|_| EngineError::Panicked)??;
+                    next_control = Instant::now() + self.control_interval(interval);
                 }
                 LoopEvent::Command(Some(command)) => {
-                    self.handle_command(command)?;
+                    self = tokio::task::spawn_blocking(move || {
+                        self.handle_command(command).map(|()| self)
+                    })
+                    .await
+                    .map_err(|_| EngineError::Panicked)??;
                     next_control = Instant::now() + self.control_interval(interval);
                 }
                 LoopEvent::Command(None) => break,
@@ -411,12 +486,22 @@ impl<B: EcBackend> Daemon<B> {
     }
 
     /// Adopt a new configuration and reset the engine so it takes effect.
+    ///
+    /// When the loaded configuration is identical to the live one (an explicit
+    /// `ReloadConfig` of an unchanged file, or a watcher re-read of the same
+    /// contents), the engine is left untouched: a reload must not cause a
+    /// redundant reset that clears dwell/anti-oscillation state.
     fn apply_config(&mut self, config: Config) {
+        if config == self.config {
+            tracing::debug!("configuration unchanged; skipping engine reset");
+            return;
+        }
         self.engine.set_policy(EnginePolicy::from_config(&config));
         // Keep the engine's manual level in sync with the reloaded file; the
         // setter clamps to the safety floor/ceiling.
         self.engine.set_manual_level(config.general.man_fan_speed);
-        self.engine.set_mode(Mode::from_active(config.general.active));
+        self.engine
+            .set_mode(Mode::from_active(config.general.active));
         self.engine
             .set_active_smart_profile(preferred_smart_slot(config.general.active));
         self.engine.reset();
@@ -507,7 +592,10 @@ fn write_config_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ec::{EC_WINDOW_SIZE, EcError, FAN_BIOS_AUTO, REG_FAN_CONTROL, TEMP_MAX_C};
+    use crate::ec::{
+        EC_WINDOW_SIZE, EcError, FAN_BIOS_AUTO, REG_FAN_CONTROL, REG_FAN_RPM_HIGH, REG_FAN_RPM_LOW,
+        TEMP_MAX_C,
+    };
     use crate::engine::Mode;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
@@ -778,6 +866,8 @@ mod tests {
     #[test]
     fn daemon_applies_manual_level() {
         let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
         let mut daemon = Daemon::new(
             ec(backend),
             smart_config(),
@@ -809,6 +899,37 @@ mod tests {
 
         assert_eq!(daemon.engine().mode(), Mode::Smart);
         assert_eq!(control_register(&bytes), 2);
+        // The automatic safety exit must update the live config like `SetMode`
+        // does, so a later persist does not write the stale Manual `Active=3`.
+        assert_eq!(daemon.config().general.active, 1);
+    }
+
+    #[test]
+    fn daemon_persists_manual_exit_as_smart() {
+        let path = temp_path("persist-manual-exit");
+        std::fs::write(
+            &path,
+            "Active=3\nManFanSpeed=1\nManModeExit=40\nHysteresis=1\nLevel=50 2 0 0\nLevel=60 3 0 0\n",
+        )
+        .unwrap();
+        let config = Config::from_file(&path).unwrap();
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 50);
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(daemon.engine().mode(), Mode::Smart);
+
+        // A later, unrelated persisted setting must capture the safety exit,
+        // not resurrect the stale `Active=3` Manual mode on the next restart.
+        daemon
+            .handle_command(Command::SetHysteresis(false))
+            .unwrap();
+        let persisted = Config::from_file(&path).unwrap();
+        assert_eq!(persisted.general.active, 1);
+        assert!(!persisted.general.hysteresis);
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -960,6 +1081,42 @@ mod tests {
     }
 
     #[test]
+    fn daemon_set_mode_smart_preserves_engine_smart_slot_across_mode_cycle() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        let config: Config = "Active=2\nLevel=50 2 0 0\nLevel=60 3 0 0\n"
+            .parse()
+            .unwrap();
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+
+        // Startup with `Active=2`: Smart 2 is the active slot.
+        assert_eq!(daemon.engine().active_smart_profile(), 2);
+
+        // Cycle BIOS -> Manual -> Smart: the transient `Active=0`/`Active=3`
+        // written by the intermediate arms must not clobber the slot when the
+        // user returns to Smart.
+        daemon.handle_command(Command::SetMode(Mode::Bios)).unwrap();
+        daemon
+            .handle_command(Command::SetMode(Mode::Manual))
+            .unwrap();
+        daemon
+            .handle_command(Command::SetMode(Mode::Smart))
+            .unwrap();
+
+        assert_eq!(daemon.engine().mode(), Mode::Smart);
+        assert_eq!(daemon.engine().active_smart_profile(), 2);
+        assert_eq!(daemon.config().general.active, 2);
+
+        // The persisted document keeps the user's Smart 2 selection too.
+        let live_ini = daemon.config().to_ini();
+        assert!(live_ini.contains("Active=2"));
+    }
+
+    #[test]
     fn daemon_applies_and_persists_set_config() {
         let path = temp_path("set-config");
         std::fs::write(&path, "Active=1\nLevel=50 2 0 0\nLevel=60 3 0 0\n").unwrap();
@@ -1020,6 +1177,8 @@ mod tests {
         let (backend, bytes) = SharedBackend::new();
         set_byte(&bytes, 0x78, 60);
         set_byte(&bytes, 0x79, 55);
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
         let backend = FlakyBackend::new(backend);
         let failures = Arc::clone(&backend.failing_offsets);
         let mut daemon = Daemon::new(
@@ -1063,6 +1222,8 @@ mod tests {
         let (backend, bytes) = SharedBackend::new();
         set_byte(&bytes, 0x78, 60);
         set_byte(&bytes, 0x79, 55);
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
         let backend = FlakyBackend::new(backend);
         let failures = Arc::clone(&backend.failing_offsets);
         failures
@@ -1078,9 +1239,12 @@ mod tests {
         );
 
         // A chronically unreadable sensor must count toward MaxReadErrors so the
-        // watchdog can revert instead of masking it indefinitely.
+        // watchdog can revert instead of masking it indefinitely. Telemetry
+        // samples between control ticks never consume the budget (it is a
+        // per-Cycle budget; see `read_sensors`).
         assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.sample().is_ok());
+        assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.tick(Instant::now()).is_err());
     }
 
@@ -1088,6 +1252,8 @@ mod tests {
     fn daemon_tolerates_max_read_errors_before_failing() {
         let (backend, bytes) = SharedBackend::new();
         set_byte(&bytes, 0x78, 60);
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
         let backend = FlakyBackend::new(backend);
         let fail_all = Arc::clone(&backend.fail_all);
         let mut config = smart_config();
@@ -1100,10 +1266,136 @@ mod tests {
 
         fail_all.store(100, Ordering::Relaxed);
 
-        // Two consecutive failed iterations are tolerated, then the daemon
-        // reports an error so the watchdog can take over.
+        // Two consecutive failed control iterations are tolerated, then the
+        // daemon reports an error so the watchdog can take over. Telemetry
+        // samples in between never consume the budget.
         assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.sample().is_ok());
+        assert!(daemon.tick(Instant::now()).is_ok());
+        assert!(daemon.tick(Instant::now()).is_err());
+    }
+
+    #[test]
+    fn daemon_counts_stuck_implausible_sensor_toward_max_read_errors() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        set_byte(&bytes, 0x79, 55);
+        let mut config = smart_config();
+        config.general.max_read_errors = 2;
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+
+        // Prime with complete, plausible readings.
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(daemon.read_errors, 0);
+
+        // The GPU sensor stops returning a plausible reading (stuck at 0): the
+        // iteration must count as failed even though the register read itself
+        // succeeds, so MaxReadErrors eventually fires instead of the stale
+        // cached value masking the fault forever.
+        set_byte(&bytes, 0x79, 0);
+        assert!(daemon.tick(Instant::now()).is_ok());
+        assert!(daemon.sample().is_ok());
+        assert!(daemon.tick(Instant::now()).is_ok());
+        assert!(daemon.tick(Instant::now()).is_err());
+    }
+
+    #[test]
+    fn daemon_counts_zero_rpm_while_commanding_nonzero_level_as_failed() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        let mut config = smart_config();
+        config.general.max_read_errors = 2;
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+        let mut state_rx = daemon.state_receiver();
+
+        // Prime with a healthy iteration: the engine commands level 3.
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(daemon.read_errors, 0);
+        // Level 3 maps to 3900 RPM on the E14 Gen 4 curve.
+        assert_eq!(state_rx.borrow_and_update().fan_rpm, 3900);
+
+        // The tachometer reads 0x0000 while level 3 is commanded: a stalled
+        // fan, a disconnected tach, or a bad EC read. This must count as a
+        // failed iteration instead of silently resetting the error streak, and
+        // telemetry must retain the last known RPM.
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0);
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(daemon.read_errors, 1);
+        assert_eq!(state_rx.borrow_and_update().fan_rpm, 3900);
+
+        // The streak accumulates toward MaxReadErrors and eventually fails.
+        // Telemetry samples never consume the per-Cycle budget.
+        assert!(daemon.sample().is_ok());
+        assert_eq!(daemon.read_errors, 1);
+        assert!(daemon.tick(Instant::now()).is_ok());
+        assert!(daemon.tick(Instant::now()).is_err());
+    }
+
+    #[test]
+    fn daemon_accepts_zero_rpm_without_a_commanded_level() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        let mut daemon = Daemon::new(
+            ec(backend),
+            smart_config(),
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+        let mut state_rx = daemon.state_receiver();
+
+        // In BIOS auto no level is commanded, so a genuine 0 RPM tach reading
+        // stays a healthy success.
+        daemon.handle_command(Command::SetMode(Mode::Bios)).unwrap();
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(daemon.read_errors, 0);
+        assert_eq!(state_rx.borrow_and_update().fan_rpm, 0);
+    }
+
+    #[test]
+    fn telemetry_failures_do_not_consume_or_reset_the_error_budget() {
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 60);
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
+        let backend = FlakyBackend::new(backend);
+        let fail_all = Arc::clone(&backend.fail_all);
+        let mut config = smart_config();
+        config.general.max_read_errors = 2;
+        let mut daemon = Daemon::new(
+            ec(backend),
+            config,
+            PathBuf::from("/nonexistent/omafanctrl.ini"),
+        );
+
+        fail_all.store(u32::MAX, Ordering::Relaxed);
+
+        // Telemetry samples fail at 4 Hz but must never consume the control
+        // budget: ten failing samples in a row leave the counter untouched.
+        for _ in 0..10 {
+            assert!(daemon.sample().is_ok());
+            assert_eq!(daemon.read_errors, 0);
+        }
+
+        // Only consecutive failed *control* iterations count toward
+        // MaxReadErrors: two are tolerated, the third aborts.
+        assert!(daemon.tick(Instant::now()).is_ok());
+        assert_eq!(daemon.read_errors, 1);
+        // A successful telemetry sample must not mask a failing control path.
+        fail_all.store(0, Ordering::Relaxed);
+        assert!(daemon.sample().is_ok());
+        fail_all.store(u32::MAX, Ordering::Relaxed);
+        assert_eq!(daemon.read_errors, 1);
+        assert!(daemon.tick(Instant::now()).is_ok());
         assert!(daemon.tick(Instant::now()).is_err());
     }
 
@@ -1236,6 +1528,8 @@ mod tests {
         std::fs::write(&path, "Level=50 2 0 0\nLevel=60 3 0 0\n").unwrap();
         let (backend, bytes) = SharedBackend::new();
         set_byte(&bytes, 0x78, 50);
+        set_byte(&bytes, REG_FAN_RPM_LOW, 0x3C);
+        set_byte(&bytes, REG_FAN_RPM_HIGH, 0x0F);
         let config = Config::from_file(&path).unwrap();
         let mut daemon = Daemon::new(ec(backend), config, path.clone())
             // A telemetry interval far longer than the control interval must not

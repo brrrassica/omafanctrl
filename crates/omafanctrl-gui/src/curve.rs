@@ -15,8 +15,9 @@ use omafanctrl_core::ec::{FAN_LEVEL_MAX, FAN_LEVEL_MIN, TEMP_MAX_C};
 /// The lower bound of the temperature axis (°C).
 const MIN_TEMPERATURE: f64 = 0.0;
 
-/// The upper bound of the temperature axis (°C).
-const MAX_TEMPERATURE: f64 = 100.0;
+/// The upper bound of the temperature axis (°C), matching the validated
+/// threshold range so any accepted threshold stays draggable.
+const MAX_TEMPERATURE: f64 = TEMP_MAX_C as f64;
 
 type ChangeCallback = Box<dyn Fn(Vec<SmartLevel>)>;
 
@@ -239,7 +240,7 @@ mod tests {
     #[test]
     fn maps_coordinates_to_values() {
         assert_eq!(x_to_temperature(0.0, 100.0), 0.0);
-        assert_eq!(x_to_temperature(100.0, 100.0), 100.0);
+        assert_eq!(x_to_temperature(100.0, 100.0), MAX_TEMPERATURE);
         assert_eq!(y_to_level(0.0, 100.0), FAN_LEVEL_MAX);
         assert_eq!(y_to_level(100.0, 100.0), FAN_LEVEL_MIN);
     }

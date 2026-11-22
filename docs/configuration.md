@@ -21,8 +21,8 @@ Both the flat TPFanCtrl2 layout and explicit sections are accepted.
 | --- | --- | --- |
 | `Active` | Active mode: 0 = BIOS, 1 = Smart 1, 2 = Smart 2, 3 = Manual | 2 |
 | `Cycle` | Polling interval, seconds | 5 |
-| `ManFanSpeed` | Manual fan level (0-7) | 0 |
-| `ManModeExit` | Temperature at which Manual mode exits (0-127 °C) | 78 |
+| `ManFanSpeed` | Manual fan level (1-7) | 3 |
+| `ManModeExit` | Temperature at which Manual mode exits (0-126 °C) | 78 |
 | `MaxReadErrors` | Consecutive read errors tolerated | 10 |
 | `IconLevels` | Three ascending temperature thresholds for the tray icon | 65 75 80 |
 | `FanBeep` | `(on, off)` beep durations | 0 0 |
@@ -38,7 +38,7 @@ The remaining TPFanCtrl2 display options (`Hotkeys`, `StayOnTop`, `SlimDialog`,
 | Key | Meaning |
 | --- | --- |
 | `IgnoreSensors` | Comma-separated sensor names (or `x<hex>` offsets) to exclude |
-| `SensorName<N>` | Display name for sensor sequence `N` |
+| `SensorName<N>` | Display name for sensor sequence `N`; must not contain `;`, `#`, `//`, or newlines |
 
 ### `[FanLevels]`
 
@@ -78,4 +78,6 @@ verified E14 Gen 4 profile.
   config back through the daemon.
 
 `SetConfig` validates the document before writing, so an invalid configuration
-never reaches disk.
+never reaches disk. Sensor display names (`SensorName<N>`) additionally reject
+`;`, `#`, `//`, and newlines, which the INI format would otherwise treat as
+inline comments or line breaks and silently truncate on reload.
