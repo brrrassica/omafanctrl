@@ -30,7 +30,7 @@ use crate::config::{Config, ConfigWatcher};
 use crate::dbus::{Command, ControlService, SensorState, State};
 use crate::ec::{Ec, EcBackend, EcError};
 use crate::engine::{
-    Engine, EngineError, EnginePolicy, Mode, SensorReading, Watchdog, apply_decision,
+    Decision, Engine, EngineError, EnginePolicy, Mode, SensorReading, Watchdog, apply_decision,
     preferred_smart_slot, read_sensor_readings,
 };
 use crate::probe::KNOWN_SENSOR_OFFSETS;
@@ -288,12 +288,38 @@ impl<B: EcBackend> Daemon<B> {
             return Ok(());
         }
         if self.engine.exit_manual_if_hot(&readings) {
-            // The thermal safety exit took over from Manual, so mirror the
-            // `SetMode` bookkeeping: record the new mode in the live config
-            // and persist it. Otherwise any later `persist_config` (for
-            // example `SetHysteresis`) would write `Active=3` to disk and a
-            // restart would silently boot back into the unsafe Manual mode.
-            self.config.general.active = self.engine.active_smart_profile();
+            // The thermal safety exit took over from Manual. Normally mirror the
+            // `SetMode` bookkeeping: record the new Smart mode in the live config
+            // and persist it, so a later `persist_config` (for example
+            // `SetHysteresis`) does not write the stale `Active=3` Manual mode
+            // back to disk. If no smart modes are configured, persisting
+            // `Active=1/2` would make the config invalid on reload; fall back to
+            // BIOS auto instead.
+            if self.config.smart_modes.is_empty() {
+                tracing::warn!(
+                    "manual mode exited due to temperature but no smart modes are \
+                     configured; falling back to BIOS auto instead of persisting \
+                     an invalid Smart active mode"
+                );
+                self.engine.set_mode(Mode::Bios);
+                self.config.general.active = 0;
+                // The engine was left in a state where `decide()` would return
+                // `Hold` (BIOS desired, no current level), so apply BIOS auto
+                // explicitly to guarantee the fan is handed back to firmware.
+                match apply_decision(self.watchdog.ec_mut(), Decision::BiosAuto) {
+                    Ok(()) => self.engine.commit(Decision::BiosAuto, now),
+                    Err(EcError::RateLimited { retry_after }) => {
+                        tracing::debug!(
+                            ?retry_after,
+                            "EC write rate-limited while falling back to BIOS auto; \
+                             retrying on the next tick"
+                        );
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                self.config.general.active = self.engine.active_smart_profile();
+            }
             self.persist_config();
             let _ = self.config_tx.send(self.config.to_ini());
         }
@@ -331,6 +357,14 @@ impl<B: EcBackend> Daemon<B> {
     pub fn handle_command(&mut self, command: Command) -> Result<(), EngineError> {
         match command {
             Command::SetMode(mode) => {
+                if mode == Mode::Smart && self.config.smart_modes.is_empty() {
+                    tracing::warn!(
+                        "rejecting SetMode(Smart): no smart modes are configured; \
+                         keeping the current mode to avoid persisting an invalid \
+                         configuration"
+                    );
+                    return Ok(());
+                }
                 self.engine.set_mode(mode);
                 // Do not re-derive the smart profile slot from the live config:
                 // while outside Smart mode `config.general.active` holds the
@@ -927,6 +961,61 @@ mod tests {
             .unwrap();
         let persisted = Config::from_file(&path).unwrap();
         assert_eq!(persisted.general.active, 1);
+        assert!(!persisted.general.hysteresis);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn manual_exit_without_smart_modes_falls_back_to_bios_and_persists() {
+        let path = temp_path("manual-exit-no-smart");
+        std::fs::write(
+            &path,
+            "Active=3\nManFanSpeed=1\nManModeExit=40\nHysteresis=1\n",
+        )
+        .unwrap();
+        let config = Config::from_file(&path).unwrap();
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 50);
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+
+        daemon.tick(Instant::now()).unwrap();
+
+        assert_eq!(daemon.engine().mode(), Mode::Bios);
+        assert_eq!(daemon.config().general.active, 0);
+        assert_eq!(control_register(&bytes), FAN_BIOS_AUTO);
+
+        // The persisted config must remain valid so a restart can reload it.
+        let persisted = Config::from_file(&path).unwrap();
+        assert_eq!(persisted.general.active, 0);
+        assert!(persisted.smart_modes.is_empty());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn set_mode_smart_without_smart_modes_is_rejected() {
+        let path = temp_path("set-smart-no-modes");
+        std::fs::write(&path, "Active=0\nHysteresis=1\n").unwrap();
+        let config = Config::from_file(&path).unwrap();
+        let (backend, _bytes) = SharedBackend::new();
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+
+        // The command must be rejected cleanly: no mode change, no invalid
+        // Active=1/2 persisted to disk.
+        daemon
+            .handle_command(Command::SetMode(Mode::Smart))
+            .unwrap();
+        assert_eq!(daemon.engine().mode(), Mode::Bios);
+        assert_eq!(daemon.config().general.active, 0);
+
+        // A later persisted setting must not write an invalid Smart active mode.
+        daemon
+            .handle_command(Command::SetHysteresis(false))
+            .unwrap();
+        let persisted = Config::from_file(&path).unwrap();
+        assert_eq!(persisted.general.active, 0);
+        assert!(persisted.smart_modes.is_empty());
         assert!(!persisted.general.hysteresis);
 
         std::fs::remove_file(&path).ok();
