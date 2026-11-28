@@ -132,6 +132,9 @@ pub const FAN_CONTROL_VERIFY_ATTEMPTS: u32 = 3;
 /// Delay between fan control verification attempts.
 pub const FAN_CONTROL_VERIFY_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Number of low/high sample pairs attempted when reading the fan tachometer.
+pub const FAN_RPM_STABILITY_ATTEMPTS: u32 = 3;
+
 /// Errors produced by the EC access layer.
 #[derive(Debug, thiserror::Error)]
 pub enum EcError {
@@ -217,6 +220,13 @@ pub enum EcError {
     SensorUnplausible {
         /// The sensor register offset.
         offset: u8,
+    },
+
+    /// The fan tachometer's high byte did not stabilize within the retry cap.
+    #[error("fan tachometer did not stabilize after {attempts} read attempts")]
+    FanRpmUnstable {
+        /// The number of low/high sample pairs attempted.
+        attempts: u32,
     },
 
     /// The fan tachometer returned an implausible reading: 0 RPM while a
@@ -424,22 +434,26 @@ impl<B: EcBackend> Ec<B> {
     /// The tachometer is sampled atomically: the high byte is read before and
     /// after the low byte, and the low byte is re-read until the two high-byte
     /// reads agree, so a low-byte rollover between transactions cannot tear
-    /// the composed value.
+    /// the composed value. At most [`FAN_RPM_STABILITY_ATTEMPTS`] sample pairs
+    /// are attempted; an unstable tachometer returns [`EcError::FanRpmUnstable`]
+    /// instead of blocking the caller indefinitely.
     pub fn read_fan_rpm(&mut self) -> Result<u16, EcError> {
         // Read high, low, high: if the tachometer is incremented between the
         // two single-byte transactions, the high byte acts as a stability
         // check for the pair. Without it, a low-byte rollover between the
         // two reads would compose a torn value off by up to 256 RPM.
         let mut high = self.read_byte(REG_FAN_RPM_HIGH)?;
-        let low = loop {
+        for _ in 0..FAN_RPM_STABILITY_ATTEMPTS {
             let low = self.read_byte(REG_FAN_RPM_LOW)?;
             let high_again = self.read_byte(REG_FAN_RPM_HIGH)?;
             if high_again == high {
-                break low;
+                return Ok((u16::from(high) << 8) | u16::from(low));
             }
             high = high_again;
-        };
-        Ok((u16::from(high) << 8) | u16::from(low))
+        }
+        Err(EcError::FanRpmUnstable {
+            attempts: FAN_RPM_STABILITY_ATTEMPTS,
+        })
     }
 
     /// Read a single temperature sensor, rejecting implausible values.
@@ -633,6 +647,62 @@ mod tests {
         }
     }
 
+    /// A tachometer whose high byte changes between reads. Supplying a 1-based
+    /// `stable_from_high_read` holds it steady from that read onward; `None`
+    /// alternates forever to exercise the retry cap.
+    #[derive(Debug)]
+    struct ScriptedRpmBackend {
+        high_reads: usize,
+        low_reads: usize,
+        stable_from_high_read: Option<usize>,
+        stable_high: u8,
+    }
+
+    impl ScriptedRpmBackend {
+        fn new(stable_from_high_read: Option<usize>, stable_high: u8) -> Self {
+            Self {
+                high_reads: 0,
+                low_reads: 0,
+                stable_from_high_read,
+                stable_high,
+            }
+        }
+    }
+
+    impl EcBackend for ScriptedRpmBackend {
+        fn read_byte(&mut self, offset: usize) -> Result<u8, EcError> {
+            check_offset(offset)?;
+            if offset == usize::from(REG_FAN_RPM_HIGH) {
+                let read_number = self.high_reads + 1;
+                let value = if self
+                    .stable_from_high_read
+                    .is_some_and(|stable_from| read_number >= stable_from)
+                {
+                    self.stable_high
+                } else if self.high_reads % 2 == 0 {
+                    0x12
+                } else {
+                    0x13
+                };
+                self.high_reads += 1;
+                Ok(value)
+            } else if offset == usize::from(REG_FAN_RPM_LOW) {
+                self.low_reads += 1;
+                Ok(0x34)
+            } else {
+                Ok(0)
+            }
+        }
+
+        fn write_byte(&mut self, offset: usize, _value: u8) -> Result<(), EcError> {
+            check_offset(offset)
+        }
+
+        fn read_window(&mut self) -> Result<[u8; EC_WINDOW_SIZE], EcError> {
+            Ok([0; EC_WINDOW_SIZE])
+        }
+    }
+
     fn ec() -> Ec<MockBackend> {
         Ec::new(MockBackend::default())
     }
@@ -658,6 +728,53 @@ mod tests {
         ec.backend.bytes[usize::from(REG_FAN_RPM_LOW)] = 0xFF;
         ec.backend.bytes[usize::from(REG_FAN_RPM_HIGH)] = 0x12;
         assert_eq!(ec.read_fan_rpm().unwrap(), 0x12FF);
+    }
+
+    #[test]
+    fn fan_rpm_read_is_bounded_when_the_high_byte_never_stabilizes() {
+        let backend = ScriptedRpmBackend::new(None, 0);
+        let mut ec = Ec::new(backend);
+
+        let error = ec.read_fan_rpm().unwrap_err();
+
+        assert!(matches!(
+            error,
+            EcError::FanRpmUnstable {
+                attempts: FAN_RPM_STABILITY_ATTEMPTS
+            }
+        ));
+        assert_eq!(ec.backend.low_reads, FAN_RPM_STABILITY_ATTEMPTS as usize);
+        assert_eq!(
+            ec.backend.high_reads,
+            FAN_RPM_STABILITY_ATTEMPTS as usize + 1
+        );
+    }
+
+    #[test]
+    fn fan_rpm_read_can_stabilize_on_the_final_attempt() {
+        // High-byte reads are 0x12, 0x13, 0x14, 0x14: only the third low/high
+        // pair is stable, and it must still be accepted.
+        let backend = ScriptedRpmBackend::new(Some(3), 0x14);
+        let mut ec = Ec::new(backend);
+
+        assert_eq!(ec.read_fan_rpm().unwrap(), 0x1434);
+        assert_eq!(ec.backend.low_reads, FAN_RPM_STABILITY_ATTEMPTS as usize);
+        assert_eq!(
+            ec.backend.high_reads,
+            FAN_RPM_STABILITY_ATTEMPTS as usize + 1
+        );
+    }
+
+    #[test]
+    fn fan_rpm_read_uses_the_refreshed_high_byte_after_a_retry() {
+        // High-byte reads are 0x12, 0x13, 0x13. The stable pair belongs to the
+        // refreshed 0x13 high byte, not the original 0x12 sample.
+        let backend = ScriptedRpmBackend::new(Some(2), 0x13);
+        let mut ec = Ec::new(backend);
+
+        assert_eq!(ec.read_fan_rpm().unwrap(), 0x1334);
+        assert_eq!(ec.backend.low_reads, 2);
+        assert_eq!(ec.backend.high_reads, 3);
     }
 
     #[test]
