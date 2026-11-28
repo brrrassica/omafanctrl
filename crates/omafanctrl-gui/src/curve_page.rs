@@ -52,7 +52,8 @@ impl CurvePage {
         let editor_group = adw::PreferencesGroup::new();
         editor_group.set_title("Smart curve");
         editor_group.set_description(Some(
-            "Drag a point to change its temperature and fan level.",
+            "Drag a point to change its temperature and fan level. \
+             When enabled, orange bands show step-up hysteresis and cyan bands show step-down hysteresis.",
         ));
         let editor = CurveEditor::new();
         editor_group.add(editor.widget());
@@ -112,6 +113,8 @@ impl CurvePage {
             .map(|mode| mode.levels.clone())
             .unwrap_or_default();
         self.editor.set_levels(levels.clone());
+        self.editor
+            .set_hysteresis_enabled(config.general.hysteresis);
 
         for row in self.level_rows.borrow_mut().drain(..) {
             self.levels_group.remove(&row);
@@ -165,6 +168,8 @@ impl CurvePage {
         }
     }
 
-    /// Apply a state snapshot (unused).
-    pub fn apply_state(&self, _state: &State) {}
+    /// Apply a state snapshot.
+    pub fn apply_state(&self, state: &State) {
+        self.editor.set_hysteresis_enabled(state.hysteresis_enabled);
+    }
 }

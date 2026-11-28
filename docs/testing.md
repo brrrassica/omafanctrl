@@ -84,6 +84,9 @@ Each step has an expected result; a failure is a release blocker.
 - [ ] Editing the file on disk and running `omafanctrl reload` applies the new
       thresholds without restarting the daemon.
 - [ ] `omafanctrl config set <file>` validates and persists a new configuration.
+- [ ] With no `Level=` entries, `omafanctrl mode smart` is rejected; if Manual
+      mode exceeds `ManModeExit` below the emergency temperature, the daemon
+      exits to BIOS and persists a loadable `Active=0` configuration.
 
 ### 5. Clients
 
@@ -91,6 +94,8 @@ Each step has an expected result; a failure is a release blocker.
       updates when the mode changes from the CLI.
 - [ ] The tab strip below the header switches between Dashboard, Smart Curve,
       and Sensors, and collapses to icons only at narrow widths.
+- [ ] The Smart Curve editor draws right-angle steps, and toggling hysteresis
+      shows or hides the orange step-up and cyan step-down bands.
 - [ ] The GUI dashboard reflows through the `desktop`, `half`, `quarter`, and
       `eighth` layouts as the window is resized, keeping the graphs on top and
       the status and controls below them.

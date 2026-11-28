@@ -30,7 +30,7 @@ use crate::config::{Config, ConfigWatcher};
 use crate::dbus::{Command, ControlService, SensorState, State};
 use crate::ec::{Ec, EcBackend, EcError};
 use crate::engine::{
-    Engine, EngineError, EnginePolicy, Mode, SensorReading, Watchdog, apply_decision,
+    Decision, Engine, EngineError, EnginePolicy, Mode, SensorReading, Watchdog, apply_decision,
     preferred_smart_slot, read_sensor_readings,
 };
 use crate::probe::KNOWN_SENSOR_OFFSETS;
@@ -287,17 +287,31 @@ impl<B: EcBackend> Daemon<B> {
             self.publish_state(&readings, fan_rpm);
             return Ok(());
         }
-        if self.engine.exit_manual_if_hot(&readings) {
+        let manual_exited = self.engine.exit_manual_if_hot(&readings);
+        if manual_exited {
             // The thermal safety exit took over from Manual, so mirror the
             // `SetMode` bookkeeping: record the new mode in the live config
             // and persist it. Otherwise any later `persist_config` (for
             // example `SetHysteresis`) would write `Active=3` to disk and a
             // restart would silently boot back into the unsafe Manual mode.
-            self.config.general.active = self.engine.active_smart_profile();
+            // With no Smart thresholds the engine exits to BIOS, whose `Active=0`
+            // remains valid and loadable on the next start.
+            self.config.general.active = match self.engine.mode() {
+                Mode::Bios => 0,
+                Mode::Manual => 3,
+                Mode::Smart => self.engine.active_smart_profile(),
+            };
             self.persist_config();
             let _ = self.config_tx.send(self.config.to_ini());
         }
-        let decision = self.engine.decide(&readings, now);
+        // `current_level == None` usually means BIOS is already applied, but a
+        // first-tick thermal exit from Manual may precede any committed level.
+        // Explicitly apply the BIOS handoff in that case too.
+        let decision = if manual_exited && self.engine.mode() == Mode::Bios {
+            Decision::BiosAuto
+        } else {
+            self.engine.decide(&readings, now)
+        };
         match apply_decision(self.watchdog.ec_mut(), decision) {
             Ok(()) => self.engine.commit(decision, now),
             Err(EcError::RateLimited { retry_after }) => {
@@ -331,6 +345,16 @@ impl<B: EcBackend> Daemon<B> {
     pub fn handle_command(&mut self, command: Command) -> Result<(), EngineError> {
         match command {
             Command::SetMode(mode) => {
+                if mode == Mode::Smart && self.config.smart_modes.is_empty() {
+                    // ControlService rejects this synchronously for CLI/GUI
+                    // callers. Keep a defensive guard here for direct commands
+                    // and queued requests after a config reload; an ordinary
+                    // validation error must not terminate the daemon loop.
+                    tracing::warn!(
+                        "ignoring Smart mode request: no smart thresholds are configured"
+                    );
+                    return Ok(());
+                }
                 self.engine.set_mode(mode);
                 // Do not re-derive the smart profile slot from the live config:
                 // while outside Smart mode `config.general.active` holds the
@@ -928,6 +952,55 @@ mod tests {
         let persisted = Config::from_file(&path).unwrap();
         assert_eq!(persisted.general.active, 1);
         assert!(!persisted.general.hysteresis);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn daemon_manual_exit_without_smart_thresholds_persists_bios() {
+        let path = temp_path("manual-exit-no-smart");
+        std::fs::write(&path, "Active=3\nManFanSpeed=1\nManModeExit=40\n").unwrap();
+        let config = Config::from_file(&path).unwrap();
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 50);
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+
+        daemon.tick(Instant::now()).unwrap();
+
+        assert_eq!(daemon.engine().mode(), Mode::Bios);
+        assert_eq!(daemon.config().general.active, 0);
+        assert_eq!(control_register(&bytes), FAN_BIOS_AUTO);
+        let persisted = Config::from_file(&path).unwrap();
+        assert_eq!(persisted.general.active, 0);
+        assert!(persisted.smart_modes.is_empty());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn daemon_rejects_empty_smart_mode_without_changing_state_or_config() {
+        let path = temp_path("reject-empty-smart");
+        let contents = "Active=3\nManFanSpeed=2\nManModeExit=40\n";
+        std::fs::write(&path, contents).unwrap();
+        let config = Config::from_file(&path).unwrap();
+        let (backend, bytes) = SharedBackend::new();
+        set_byte(&bytes, 0x78, 40);
+        let mut daemon = Daemon::new(ec(backend), config, path.clone());
+        let mut config_rx = daemon.config_receiver();
+        let _ = config_rx.borrow_and_update();
+        daemon.tick(Instant::now()).unwrap();
+        assert_eq!(control_register(&bytes), 2);
+
+        daemon
+            .handle_command(Command::SetMode(Mode::Smart))
+            .unwrap();
+
+        assert_eq!(daemon.engine().mode(), Mode::Manual);
+        assert_eq!(daemon.engine().current_level(), Some(2));
+        assert_eq!(daemon.config().general.active, 3);
+        assert_eq!(control_register(&bytes), 2);
+        assert!(!config_rx.has_changed().unwrap_or(false));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
 
         std::fs::remove_file(&path).ok();
     }

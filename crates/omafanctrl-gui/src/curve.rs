@@ -11,6 +11,7 @@ use gtk::cairo;
 use gtk::prelude::*;
 use omafanctrl_core::config::SmartLevel;
 use omafanctrl_core::ec::{FAN_LEVEL_MAX, FAN_LEVEL_MIN, TEMP_MAX_C};
+use omafanctrl_core::engine::highest_smart_level;
 
 /// The lower bound of the temperature axis (°C).
 const MIN_TEMPERATURE: f64 = 0.0;
@@ -26,6 +27,7 @@ type ChangeCallback = Box<dyn Fn(Vec<SmartLevel>)>;
 pub struct CurveEditor {
     area: gtk::DrawingArea,
     levels: Rc<RefCell<Vec<SmartLevel>>>,
+    hysteresis_enabled: Rc<Cell<bool>>,
     on_change: Rc<RefCell<Option<ChangeCallback>>>,
 }
 
@@ -36,11 +38,19 @@ impl CurveEditor {
         area.set_content_height(200);
         area.set_hexpand(true);
         let levels = Rc::new(RefCell::new(Vec::new()));
+        let hysteresis_enabled = Rc::new(Cell::new(true));
         let on_change: Rc<RefCell<Option<ChangeCallback>>> = Rc::new(RefCell::new(None));
 
         let levels_for_draw = Rc::clone(&levels);
+        let hysteresis_for_draw = Rc::clone(&hysteresis_enabled);
         area.set_draw_func(move |_, cr, width, height| {
-            draw(cr, width, height, &levels_for_draw.borrow());
+            draw(
+                cr,
+                width,
+                height,
+                &levels_for_draw.borrow(),
+                hysteresis_for_draw.get(),
+            );
         });
 
         let drag = gtk::GestureDrag::new();
@@ -87,6 +97,7 @@ impl CurveEditor {
         Self {
             area,
             levels,
+            hysteresis_enabled,
             on_change,
         }
     }
@@ -100,6 +111,13 @@ impl CurveEditor {
     pub fn set_levels(&self, levels: Vec<SmartLevel>) {
         *self.levels.borrow_mut() = levels;
         self.area.queue_draw();
+    }
+
+    /// Set whether the engine's hysteresis extents are shown.
+    pub fn set_hysteresis_enabled(&self, enabled: bool) {
+        if self.hysteresis_enabled.replace(enabled) != enabled {
+            self.area.queue_draw();
+        }
     }
 
     /// Register a callback invoked whenever a threshold is dragged.
@@ -183,8 +201,83 @@ fn move_level_at(levels: &mut [SmartLevel], index: usize, temperature: f64, fan_
     true
 }
 
-/// Draw the curve.
-fn draw(cr: &cairo::Context, width: i32, height: i32, levels: &[SmartLevel]) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HysteresisDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HysteresisBand {
+    start: f64,
+    end: f64,
+    direction: HysteresisDirection,
+}
+
+/// Build the horizontal-then-vertical path used by the engine's step lookup.
+fn step_points(levels: &[SmartLevel], width: f64, height: f64) -> Vec<(f64, f64)> {
+    let Some(first) = levels.first() else {
+        return Vec::new();
+    };
+    let mut points = vec![
+        (0.0, level_to_y(first.fan_level, height)),
+        (
+            temperature_to_x(f64::from(first.temperature), width),
+            level_to_y(first.fan_level, height),
+        ),
+    ];
+    let mut previous_y = points[1].1;
+    for level in &levels[1..] {
+        let x = temperature_to_x(f64::from(level.temperature), width);
+        let y = level_to_y(level.fan_level, height);
+        points.push((x, previous_y));
+        if y != previous_y {
+            points.push((x, y));
+        }
+        previous_y = y;
+    }
+    // The final level remains in force all the way to the temperature ceiling.
+    points.push((width, previous_y));
+    points
+}
+
+/// Build the effective hysteresis extents, omitting superseded plateau rows.
+fn hysteresis_bands(levels: &[SmartLevel], width: f64, enabled: bool) -> Vec<HysteresisBand> {
+    if !enabled {
+        return Vec::new();
+    }
+    let mut bands = Vec::new();
+    for level in levels {
+        if highest_smart_level(levels, level.fan_level) != Some(*level) {
+            continue;
+        }
+        let x = temperature_to_x(f64::from(level.temperature), width);
+        if level.hyst_up > 0 {
+            bands.push(HysteresisBand {
+                start: x,
+                end: temperature_to_x(
+                    f64::from(level.temperature.saturating_add(level.hyst_up)),
+                    width,
+                ),
+                direction: HysteresisDirection::Up,
+            });
+        }
+        if level.hyst_down > 0 {
+            bands.push(HysteresisBand {
+                start: temperature_to_x(
+                    f64::from(level.temperature.saturating_sub(level.hyst_down)),
+                    width,
+                ),
+                end: x,
+                direction: HysteresisDirection::Down,
+            });
+        }
+    }
+    bands
+}
+
+/// Draw the threshold step curve and the engine's hysteresis extents.
+fn draw(cr: &cairo::Context, width: i32, height: i32, levels: &[SmartLevel], hysteresis: bool) {
     let width = f64::from(width);
     let height = f64::from(height);
 
@@ -196,19 +289,24 @@ fn draw(cr: &cairo::Context, width: i32, height: i32, levels: &[SmartLevel]) {
         return;
     }
 
+    for band in hysteresis_bands(levels, width, hysteresis) {
+        let color = match band.direction {
+            HysteresisDirection::Up => (1.0, 0.65, 0.2, 0.18),
+            HysteresisDirection::Down => (0.2, 0.8, 0.9, 0.18),
+        };
+        cr.set_source_rgba(color.0, color.1, color.2, color.3);
+        cr.rectangle(band.start, 0.0, (band.end - band.start).max(0.0), height);
+        let _ = cr.fill();
+    }
+
     cr.set_source_rgba(0.2, 0.6, 1.0, 0.9);
     cr.set_line_width(2.0);
-    let mut first = true;
-    for level in levels {
-        let x = temperature_to_x(f64::from(level.temperature), width);
-        let y = level_to_y(level.fan_level, height);
-        if first {
-            cr.move_to(0.0, y);
-            cr.line_to(x, y);
-            first = false;
-        } else {
-            cr.line_to(x, y);
-        }
+    let points = step_points(levels, width, height);
+    if let Some(&(x, y)) = points.first() {
+        cr.move_to(x, y);
+    }
+    for &(x, y) in &points[1..] {
+        cr.line_to(x, y);
     }
     let _ = cr.stroke();
 
@@ -243,6 +341,84 @@ mod tests {
         assert_eq!(x_to_temperature(100.0, 100.0), MAX_TEMPERATURE);
         assert_eq!(y_to_level(0.0, 100.0), FAN_LEVEL_MAX);
         assert_eq!(y_to_level(100.0, 100.0), FAN_LEVEL_MIN);
+    }
+
+    #[test]
+    fn step_curve_uses_horizontal_then_vertical_segments() {
+        let levels = vec![level(40, 1), level(60, 3)];
+
+        assert_eq!(
+            step_points(&levels, 254.0, 84.0),
+            vec![
+                (0.0, 84.0),
+                (80.0, 84.0),
+                (120.0, 84.0),
+                (120.0, 56.0),
+                (254.0, 56.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn step_curve_handles_empty_single_and_duplicate_levels() {
+        assert!(step_points(&[], 127.0, 126.0).is_empty());
+        assert_eq!(
+            step_points(&[level(60, 2)], 127.0, 126.0),
+            vec![(0.0, 105.0), (60.0, 105.0), (127.0, 105.0)]
+        );
+
+        let levels = vec![level(40, 1), level(50, 2), level(60, 2), level(70, 4)];
+        let points = step_points(&levels, 127.0, 126.0);
+        assert!(points.contains(&(50.0, 105.0)));
+        assert!(points.contains(&(60.0, 105.0)));
+        assert!(
+            points
+                .windows(2)
+                .all(|pair| pair[0].0 == pair[1].0 || pair[0].1 == pair[1].1)
+        );
+    }
+
+    #[test]
+    fn hysteresis_bands_show_effective_up_and_down_offsets() {
+        let mut threshold = level(60, 2);
+        threshold.hyst_up = 5;
+        threshold.hyst_down = 4;
+
+        assert_eq!(
+            hysteresis_bands(&[threshold], 127.0, true),
+            vec![
+                HysteresisBand {
+                    start: 60.0,
+                    end: 65.0,
+                    direction: HysteresisDirection::Up,
+                },
+                HysteresisBand {
+                    start: 56.0,
+                    end: 60.0,
+                    direction: HysteresisDirection::Down,
+                },
+            ]
+        );
+        assert!(hysteresis_bands(&[threshold], 127.0, false).is_empty());
+    }
+
+    #[test]
+    fn hysteresis_bands_omit_zero_and_superseded_plateau_offsets() {
+        assert!(hysteresis_bands(&[level(60, 2)], 127.0, true).is_empty());
+
+        let mut lower = level(50, 2);
+        lower.hyst_up = 1;
+        lower.hyst_down = 1;
+        let mut higher = level(60, 2);
+        higher.hyst_up = 5;
+        higher.hyst_down = 4;
+        let bands = hysteresis_bands(&[lower, higher], 127.0, true);
+
+        assert_eq!(bands.len(), 2);
+        assert_eq!(bands[0].start, 60.0);
+        assert_eq!(bands[0].end, 65.0);
+        assert_eq!(bands[1].start, 56.0);
+        assert_eq!(bands[1].end, 60.0);
     }
 
     #[test]

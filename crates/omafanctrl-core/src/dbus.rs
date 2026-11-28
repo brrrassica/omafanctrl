@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 
-use crate::config::{Config, ConfigError};
+use crate::config::{Config, ConfigError, ValidationError};
 use crate::engine::Mode;
 
 /// The well-known D-Bus name owned by the daemon.
@@ -304,8 +304,18 @@ impl ControlService {
     }
 
     /// Switch the active mode.
+    ///
+    /// Smart mode requires at least one configured threshold. Reject it before
+    /// queueing so CLI and GUI callers receive the same validation error as an
+    /// invalid `Active=1/2` configuration instead of a silent safety-floor fan.
     pub fn set_mode(&self, mode: &str) -> Result<(), ServiceError> {
         let mode = parse_mode(mode)?;
+        if mode == Mode::Smart {
+            let config: Config = self.config.borrow().parse()?;
+            if config.smart_modes.is_empty() {
+                return Err(ConfigError::Validation(ValidationError::SmartModeMissing).into());
+            }
+        }
         self.send(Command::SetMode(mode))
     }
 
@@ -509,7 +519,7 @@ mod tests {
         mpsc::Receiver<Command>,
     ) {
         let (state_tx, state_rx) = watch::channel(State::default());
-        let (_config_tx, config_rx) = watch::channel(String::new());
+        let (_config_tx, config_rx) = watch::channel("Level=50 2 0 0\n".to_string());
         let (command_tx, command_rx) = mpsc::channel(16);
         (
             ControlService::new(state_rx, config_rx, command_tx, config_path),
@@ -532,6 +542,49 @@ mod tests {
             parse_mode("turbo"),
             Err(ServiceError::UnknownMode(mode)) if mode == "turbo"
         ));
+    }
+
+    #[test]
+    fn set_mode_rejects_smart_without_thresholds_and_queues_nothing() {
+        let (state_tx, state_rx) = watch::channel(State::default());
+        let (_config_tx, config_rx) = watch::channel("Active=0\n".to_string());
+        let (command_tx, mut command_rx) = mpsc::channel(16);
+        let service = ControlService::new(
+            state_rx,
+            config_rx,
+            command_tx,
+            PathBuf::from("/tmp/omafanctrl-test.ini"),
+        );
+
+        let error = service.set_mode("smart").unwrap_err();
+        assert!(matches!(
+            error,
+            ServiceError::Config(ConfigError::Validation(ValidationError::SmartModeMissing))
+        ));
+        assert!(command_rx.try_recv().is_err());
+
+        // The guard is specific to Smart; valid modes remain available.
+        service.set_mode("bios").unwrap();
+        service.set_mode("manual").unwrap();
+        assert_eq!(command_rx.try_recv().unwrap(), Command::SetMode(Mode::Bios));
+        assert_eq!(
+            command_rx.try_recv().unwrap(),
+            Command::SetMode(Mode::Manual)
+        );
+        drop(state_tx);
+    }
+
+    #[test]
+    fn set_mode_queues_smart_when_thresholds_are_configured() {
+        let (service, _state_tx, mut command_rx) =
+            service(PathBuf::from("/tmp/omafanctrl-test.ini"));
+
+        service.set_mode("smart").unwrap();
+
+        assert_eq!(
+            command_rx.try_recv().unwrap(),
+            Command::SetMode(Mode::Smart)
+        );
     }
 
     #[test]
@@ -626,7 +679,7 @@ mod tests {
     #[test]
     fn commands_fail_when_the_loop_is_gone() {
         let (state_tx, state_rx) = watch::channel(State::default());
-        let (_config_tx, config_rx) = watch::channel(String::new());
+        let (_config_tx, config_rx) = watch::channel("Level=50 2 0 0\n".to_string());
         let (command_tx, command_rx) = mpsc::channel(1);
         drop(command_rx);
         let service = ControlService::new(
@@ -645,7 +698,7 @@ mod tests {
     #[test]
     fn commands_report_a_full_channel_while_the_loop_is_alive() {
         let (state_tx, state_rx) = watch::channel(State::default());
-        let (_config_tx, config_rx) = watch::channel(String::new());
+        let (_config_tx, config_rx) = watch::channel("Level=50 2 0 0\n".to_string());
         let (command_tx, command_rx) = mpsc::channel(1);
         let service = ControlService::new(
             state_rx,
@@ -667,7 +720,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("omafanctrl-dbus-full-{}.ini", std::process::id()));
         let (state_tx, state_rx) = watch::channel(State::default());
-        let (_config_tx, config_rx) = watch::channel(String::new());
+        let (_config_tx, config_rx) = watch::channel("Level=50 2 0 0\n".to_string());
         let (command_tx, command_rx) = mpsc::channel(1);
         let service = ControlService::new(state_rx, config_rx, command_tx, path.clone());
         service.reload_config().expect("first command fits");

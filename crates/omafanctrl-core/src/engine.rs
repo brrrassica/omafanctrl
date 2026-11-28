@@ -428,8 +428,11 @@ impl Engine {
     ///
     /// Mirrors TPFanCtrl2's `HandleData`: Manual mode is a temporary override,
     /// and once the temperature passes the configured exit threshold the engine
-    /// returns to Smart mode. The dwell timer is cleared so the smart level
-    /// takes effect immediately. Returns `true` when the mode changed.
+    /// returns to Smart mode. If no smart thresholds are configured, it returns
+    /// to BIOS auto instead so the firmware keeps control of the fan. At the
+    /// emergency temperature Manual mode is retained so the engine can force
+    /// the safety ceiling. The dwell timer is cleared so the next decision takes
+    /// effect immediately. Returns `true` when the mode changed.
     pub fn exit_manual_if_hot(&mut self, readings: &[SensorReading]) -> bool {
         if self.mode != Mode::Manual {
             return false;
@@ -440,7 +443,22 @@ impl Engine {
         if max_temperature <= self.policy.man_mode_exit {
             return false;
         }
-        self.mode = Mode::Smart;
+        // At the emergency ceiling Manual mode must remain active long enough
+        // for `decide` to force the maximum fan level instead of handing off.
+        if self.policy.smart_levels.is_empty()
+            && max_temperature >= self.policy.emergency_temperature
+        {
+            return false;
+        }
+        // A valid Manual-mode config may omit Smart thresholds entirely. Never
+        // enter Smart with an empty table: persist `Active=0` and let the
+        // firmware manage the thermal exit instead of commanding the safety
+        // floor indefinitely.
+        self.mode = if self.policy.smart_levels.is_empty() {
+            Mode::Bios
+        } else {
+            Mode::Smart
+        };
         // Smart mode re-syncs its level from the threshold table; the manual
         // level this mode is exiting from has no table entry, so clear it (see
         // `set_mode`).
@@ -550,11 +568,30 @@ impl Engine {
     /// tests). The daemon uses [`Engine::decide`] and [`Engine::commit`]
     /// separately so that a failed EC write is retried on the next tick.
     pub fn evaluate(&mut self, readings: &[SensorReading], now: Instant) -> Decision {
-        self.exit_manual_if_hot(readings);
-        let decision = self.decide(readings, now);
+        let exited_to_bios = self.exit_manual_if_hot(readings) && self.mode == Mode::Bios;
+        // A Manual → BIOS fallback must be applied even when no manual level was
+        // ever committed (`current_level == None` normally means BIOS already).
+        let decision = if exited_to_bios {
+            Decision::BiosAuto
+        } else {
+            self.decide(readings, now)
+        };
         self.commit(decision, now);
         decision
     }
+}
+
+/// Return the highest-temperature threshold configured for a fan level.
+///
+/// Duplicate fan levels form a valid plateau. Both the base lookup and the
+/// hysteresis lookup use the plateau's highest entry, so callers must not use
+/// the first matching row merely because it declares the same fan level.
+pub fn highest_smart_level(levels: &[SmartLevel], fan_level: u8) -> Option<SmartLevel> {
+    levels
+        .iter()
+        .filter(|level| level.fan_level == fan_level)
+        .max_by_key(|level| level.temperature)
+        .copied()
 }
 
 /// Map a temperature to a fan level using the smart-mode thresholds.
@@ -596,7 +633,7 @@ fn smart_target(
     if base > current {
         // Stepping up: require the temperature to clear the target threshold by
         // its upward hysteresis.
-        if let Some(target) = levels.iter().find(|level| level.fan_level == base) {
+        if let Some(target) = highest_smart_level(levels, base) {
             if temperature < target.temperature.saturating_add(target.hyst_up) {
                 return Some(current);
             }
@@ -604,7 +641,7 @@ fn smart_target(
     } else {
         // Stepping down: require the temperature to fall below the current
         // threshold by its downward hysteresis.
-        let current_hyst_down = match levels.iter().find(|level| level.fan_level == current) {
+        let current_hyst_down = match highest_smart_level(levels, current) {
             // The committed level is listed in the table: hold until the
             // temperature falls below its own threshold minus its dwell.
             Some(current_level) => {
@@ -871,6 +908,29 @@ mod tests {
     }
 
     #[test]
+    fn manual_mode_exits_to_bios_when_smart_thresholds_are_missing() {
+        let mut engine = Engine::new(EnginePolicy {
+            min_dwell: Duration::from_secs(3600),
+            man_mode_exit: 40,
+            ..policy(vec![])
+        });
+        engine.set_mode(Mode::Manual);
+        engine.set_manual_level(1);
+        let now = Instant::now();
+        assert_eq!(
+            engine.evaluate(&[reading(0x78, "cpu", 40)], now),
+            Decision::SetLevel(1)
+        );
+
+        assert_eq!(
+            engine.evaluate(&[reading(0x78, "cpu", 50)], now),
+            Decision::BiosAuto
+        );
+        assert_eq!(engine.mode(), Mode::Bios);
+        assert_eq!(engine.current_level(), None);
+    }
+
+    #[test]
     fn smart_mode_maps_temperature_to_level() {
         let levels = vec![smart_level(50, 2, 0, 0), smart_level(60, 3, 0, 0)];
         // Below the first threshold uses the first level's fan level; at or
@@ -930,6 +990,26 @@ mod tests {
         // Listed levels keep their own per-entry dwell.
         assert_eq!(smart_target(&levels, 57, Some(3), true), Some(3));
         assert_eq!(smart_target(&levels, 55, Some(3), true), Some(2));
+    }
+
+    #[test]
+    fn duplicate_fan_levels_use_the_highest_matching_hysteresis_entry() {
+        let levels = vec![
+            smart_level(40, 1, 0, 0),
+            smart_level(50, 2, 1, 1),
+            smart_level(60, 2, 5, 4),
+            smart_level(70, 3, 0, 0),
+        ];
+
+        // Stepping up to the plateau uses its highest entry: 60 + 5, not 50 + 1.
+        assert_eq!(smart_target(&levels, 61, Some(1), true), Some(1));
+        assert_eq!(smart_target(&levels, 65, Some(1), true), Some(2));
+
+        // Stepping down from the plateau also uses its highest entry: at 49 °C
+        // the 60 - 4 boundary is clear, while the superseded 50 - 1 boundary
+        // would still hold the old level.
+        assert_eq!(smart_target(&levels, 55, Some(2), true), Some(2));
+        assert_eq!(smart_target(&levels, 49, Some(2), true), Some(1));
     }
 
     #[test]
